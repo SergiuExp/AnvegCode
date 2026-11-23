@@ -1,0 +1,25 @@
+[package]
+name = "anveg_app"
+description = "Anveg Code: a lightweight desktop app for managing Claude Code sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "anveg-code"
+path = "src/main.rs"
+
+[dependencies]
+anveg_core.workspace = true
+anveg_term.workspace = true
+anyhow.workspace = true
+gpui-kit.workspace = true
+gpui-cn = { workspace = true, features = ["ghostty"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[lints]
+workspace = true
