@@ -1,7 +1,7 @@
 # Anveg Code — Build Plan (Phases 1–3)
 
 > **Audience:** Claude Code, building this app from an empty repository.
-> **Companion document:** `anveg-code-next-phases.md` (Phases 4–7: file tree and editor, git panel, GitHub, per-session change review).
+> **Companion document:** `docs/next-phases.md` (Phases 4–7: file tree and editor, git panel, GitHub; Phase 7, per-session change review, is postponed to `docs/TODO.md`).
 > **Facts about Claude Code** in section 5 were checked against the official docs in November 2026. Re-check flags with `claude --help` and the links in section 13 before relying on them.
 >
 > **Revisions**

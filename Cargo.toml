@@ -16,7 +16,29 @@ anveg_term = { path = "crates/anveg_term" }
 # UI. gpui-kit re-exports GPUI (the `gpui-pre` snapshot it pins exactly),
 # gpui-base and Longbridge's gpui-component. gpui-cn's terminal (libghostty-vt)
 # requires gpui-kit 0.8.x, so both are pinned exactly. See docs/PROGRESS.md.
-gpui-kit = { version = "=0.8.1", default-features = false, features = ["assets"] }
+gpui-kit = { version = "=0.8.1", default-features = false, features = [
+    "assets",
+    # Phase 4: gpui-component's code editor, diff view, Markdown and
+    # tree-sitter highlighting (docs/PROGRESS.md, M19).
+    "component",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-go",
+    "tree-sitter-toml",
+    "tree-sitter-yaml",
+    "tree-sitter-markdown",
+    "tree-sitter-markdown-inline",
+    "tree-sitter-html",
+    "tree-sitter-css",
+    "tree-sitter-bash",
+    "tree-sitter-swift",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-diff",
+] }
 gpui-cn = { version = "=0.9.0", default-features = false }
 
 anyhow = "1"
