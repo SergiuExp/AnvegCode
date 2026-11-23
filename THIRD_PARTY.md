@@ -9,9 +9,9 @@ Rust crate dependencies, and their licenses, are checked with `cargo deny check 
 | Lucide icons | `gpui-kit-assets` crate | ISC | Embedded SVG icons. |
 | GPUI | `gpui-pre` crates (Zed) | Apache-2.0 | Only the Apache-2.0 GPUI crates are used; no Zed GPL code. |
 
-## Licenses pending the owner's approval
+## Licenses beyond the default allow-list
 
-These appear in the dependency graph and are not in the default allow-list (build plan, section 3.2):
+These were outside the default allow-list (build plan, section 3.2). The owner approved them on 2026-11-23:
 
 | Crate | License | Pulled in by | Ships in the binary? |
 |---|---|---|---|

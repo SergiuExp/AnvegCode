@@ -30,7 +30,7 @@ There are no git dependencies: everything comes from crates.io with exact `=` pi
 - A GPUI window with a transparent title bar (gpui-cn `TitleBar`), using gpui-cn's theme. It follows the system light or dark mode.
 
 **Decisions**
-1. **Component library: gpui-base + gpui-cn, not Longbridge's gpui-component.** *(Please confirm.)*
+1. **Component library: gpui-base + gpui-cn, not Longbridge's gpui-component.** *(Confirmed by the owner on 2026-11-23.)*
    - Longbridge's library is now `gpui-kit` (gpui-base + gpui-component + assets). gpui-cn's terminal requires gpui-kit **0.8.x**, so gpui-kit is pinned at 0.8.1, not the latest 0.11.
    - gpui-component and gpui-cn each install their own theme and their own `Root` plugin (tooltip overlay, window surface). Running both would mean two competing themes in one window.
    - gpui-cn is a complete styled library on top of gpui-base: sidebar, dialogs, menus and context menus, tabs, inputs, a command palette, and folder and file pickers. It is also where the terminal lives.
@@ -73,7 +73,7 @@ There are no git dependencies: everything comes from crates.io with exact `=` pi
 | Idle CPU | Output is event-driven (no polling), hidden terminals publish no frames, cursor blink is off by default | gpui-cn also "parks" terminals idle for 60 s (frees the parser's memory). |
 
 **Known issues / open questions**
-- **`cargo deny check licenses` fails** until the owner decides on these licenses (details in `THIRD_PARTY.md`):
+- **Licenses (resolved 2026-11-23):** the owner approved adding MPL-2.0 and CDLA-Permissive-2.0 to the allow-list for these crates (details in `THIRD_PARTY.md`):
   - MPL-2.0: `nucleo-matcher` (inside gpui-cn, ships), `option-ext` (via `dirs`/`directories`, ships), `cbindgen` (build tool only).
   - CDLA-Permissive-2.0: `webpki-root-certs` (build tool only).
   - None of these can be avoided while gpui-cn is used. `option-ext` arrives through `ghostty-vt` → `dirs` even without our own `directories` dependency.
