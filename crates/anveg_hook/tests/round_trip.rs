@@ -34,7 +34,10 @@ fn a_hook_event_reaches_the_app() -> anyhow::Result<()> {
     let out = child.wait_with_output()?;
     let elapsed = started.elapsed();
     assert!(out.status.success());
-    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "the hook must print nothing");
+    assert!(
+        out.stdout.is_empty() && out.stderr.is_empty(),
+        "the hook must print nothing"
+    );
     assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
 
     let m = rx.recv_timeout(Duration::from_secs(5))?;

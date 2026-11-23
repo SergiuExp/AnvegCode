@@ -8,6 +8,8 @@ Rust crate dependencies, and their licenses, are checked with `cargo deny check 
 | gpui-cn terminal (portions derived from Herdr and Muxy) | `gpui-cn` crate | Apache-2.0; Muxy portions MIT | See `LICENSE-MUXY` in the gpui-cn crate. |
 | Lucide icons | `gpui-kit-assets` crate | ISC | Embedded SVG icons. |
 | GPUI | `gpui-pre` crates (Zed) | Apache-2.0 | Only the Apache-2.0 GPUI crates are used; no Zed GPL code. |
+| Light terminal palette | `crates/anveg_term/src/lib.rs` | Apache-2.0 (this project) | Written for Anveg Code; the dark palette is Ghostty's default. |
+| Transcript fixtures | `tests/fixtures/transcripts/` | Apache-2.0 (this project) | Recorded from Claude Code 2.1.330 test sessions and sanitized (no attachments, no personal data). |
 
 ## Licenses beyond the default allow-list
 

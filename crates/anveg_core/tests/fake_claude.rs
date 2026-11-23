@@ -46,7 +46,12 @@ fn new_session_rename_and_resume_show_up_in_the_index() -> anyhow::Result<()> {
         session_id: "aaaaaaaa-0000-4000-8000-000000000001".into(),
         name: Some("Given name".into()),
     };
-    let out = run(&project, &config, &claude_args(&start, &options), "Fix the bug\n/exit\n")?;
+    let out = run(
+        &project,
+        &config,
+        &claude_args(&start, &options),
+        "Fix the bug\n/exit\n",
+    )?;
     assert!(out.contains("echo: Fix the bug"), "{out}");
     assert!(out.contains("--add-dir /x"), "{out}");
 
@@ -61,7 +66,12 @@ fn new_session_rename_and_resume_show_up_in_the_index() -> anyhow::Result<()> {
     let resume = SessionStart::Resume {
         session_id: "aaaaaaaa-0000-4000-8000-000000000001".into(),
     };
-    run(&project, &config, &claude_args(&resume, &options), "/rename Better name\n/exit\n")?;
+    run(
+        &project,
+        &config,
+        &claude_args(&resume, &options),
+        "/rename Better name\n/exit\n",
+    )?;
     assert!(index.refresh());
     assert_eq!(index.sessions(false)[0].display_name, "Better name");
 
@@ -82,7 +92,12 @@ fn worktree_sessions_land_in_their_own_group() -> anyhow::Result<()> {
         session_id: "bbbbbbbb-0000-4000-8000-000000000002".into(),
         name: None,
     };
-    run(&project, &config, &claude_args(&start, &ClaudeOptions::default()), "hello\n/exit\n")?;
+    run(
+        &project,
+        &config,
+        &claude_args(&start, &ClaudeOptions::default()),
+        "hello\n/exit\n",
+    )?;
     let mut index = SessionIndex::load(config, project, tmp.path().join("s.json"));
     index.refresh();
     let list = index.sessions(false);

@@ -20,13 +20,13 @@ mod meta;
 
 use anveg_core::launcher::LaunchSpec;
 use gpui_cn::terminal::{
-    EngineOptions, LocalTerminalOptions, Terminal, TerminalAppearance, TerminalConfig,
-    TerminalEvent, TerminalState, TerminalStatus, WorkingDirectory,
+    EngineOptions, LocalTerminalOptions, Terminal, TerminalAppearance, TerminalColors,
+    TerminalConfig, TerminalEvent, TerminalState, TerminalStatus, WorkingDirectory,
 };
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, px,
+    SharedString, Styled as _, Subscription, Window, WindowAppearance, div, px,
 };
 
 /// Set up the terminal engine and its UI. Call once, after `gpui_kit::init`.
@@ -132,7 +132,7 @@ pub struct TerminalView {
     id: ElementId,
     state: Entity<TerminalState>,
     option_as_meta: bool,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -147,7 +147,9 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Self {
         let options = local_options(spec, settings);
-        let config = TerminalConfig::default().with_appearance(appearance(settings));
+        let config = TerminalConfig::default()
+            .with_appearance(appearance(settings))
+            .with_colors(colors_for(window.appearance()));
         tracing::info!(program = ?spec.program, args = ?spec.args, cwd = ?spec.cwd, "starting terminal");
         let state = cx.new(|cx| TerminalState::local(options, config, window, cx));
         let events = cx.subscribe(&state, |this, state, event, cx| {
@@ -155,11 +157,17 @@ impl TerminalView {
         });
         // Redraw this view when a new frame arrives.
         let frames = cx.observe(&state, |_, _, cx| cx.notify());
+        // Follow the system's light or dark mode, live.
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            let colors = colors_for(window.appearance());
+            this.state
+                .update(cx, |state, cx| state.set_colors(colors, cx));
+        });
         Self {
             id: id.into(),
             state,
             option_as_meta: settings.option_as_meta,
-            _subscriptions: [events, frames],
+            _subscriptions: [events, frames, appearance],
         }
     }
 
@@ -289,6 +297,41 @@ impl Render for TerminalView {
     }
 }
 
+/// A light palette (the dark one is Ghostty's default).
+const LIGHT_THEME: &str = "\
+background = #fbfbfa
+foreground = #262626
+cursor-color = #3a3a3a
+selection-background = #cfe3ff
+selection-foreground = #1a1a1a
+palette = 0=#2b2b2b
+palette = 1=#c4352f
+palette = 2=#2f8a3c
+palette = 3=#9a6a00
+palette = 4=#2a62c9
+palette = 5=#a23fb0
+palette = 6=#16808a
+palette = 7=#bdbdbd
+palette = 8=#6e6e6e
+palette = 9=#de4a43
+palette = 10=#3aa44a
+palette = 11=#b88200
+palette = 12=#3f7ae0
+palette = 13=#bb52c9
+palette = 14=#1f9aa5
+palette = 15=#e8e8e8
+";
+
+/// The terminal colors for a window appearance.
+fn colors_for(appearance: WindowAppearance) -> TerminalColors {
+    match appearance {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => {
+            TerminalColors::from_ghostty_theme(LIGHT_THEME).unwrap_or_default()
+        }
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => TerminalColors::default(),
+    }
+}
+
 fn appearance(settings: &TerminalSettings) -> TerminalAppearance {
     TerminalAppearance::default()
         .with_font_family(settings.font_family.clone())
@@ -317,4 +360,18 @@ fn local_options(spec: &LaunchSpec, settings: &TerminalSettings) -> LocalTermina
         options = options.without_env(name.clone());
     }
     options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_light_theme_parses() {
+        assert!(TerminalColors::from_ghostty_theme(LIGHT_THEME).is_ok());
+        assert_ne!(
+            colors_for(WindowAppearance::Light),
+            colors_for(WindowAppearance::Dark)
+        );
+    }
 }

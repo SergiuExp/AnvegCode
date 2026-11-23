@@ -32,7 +32,10 @@ impl DirWatcher {
                 None,
                 move |result: DebounceEventResult| match result {
                     Ok(events) => {
-                        if !events.is_empty() {
+                        // Reading a transcript (which every refresh does) is
+                        // reported as an access event on Linux; reacting to
+                        // it would refresh forever.
+                        if events.iter().any(|e| is_change(&e.event.kind)) {
                             on_change();
                         }
                     }
@@ -81,6 +84,11 @@ impl DirWatcher {
     }
 }
 
+/// Whether an event is a real change (not just a read).
+fn is_change(kind: &notify::EventKind) -> bool {
+    !matches!(kind, notify::EventKind::Access(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,8 +105,19 @@ mod tests {
         assert_eq!(watcher.watched().len(), 1);
         std::fs::write(tmp.path().join("a.jsonl"), "{}\n")?;
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        // Reading files is not a change.
+        while rx.try_recv().is_ok() {}
+        let _ = std::fs::read(tmp.path().join("a.jsonl"))?;
+        assert!(rx.recv_timeout(Duration::from_millis(800)).is_err());
         watcher.set_dirs(&[]);
         assert!(watcher.watched().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn access_is_not_a_change() {
+        use notify::event::{AccessKind, CreateKind};
+        assert!(!is_change(&notify::EventKind::Access(AccessKind::Any)));
+        assert!(is_change(&notify::EventKind::Create(CreateKind::File)));
     }
 }
