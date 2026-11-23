@@ -20,6 +20,16 @@ gpui-cn = { workspace = true, features = ["ghostty"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+futures.workspace = true
+uuid.workspace = true
+shell-words.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSBundle", "NSString", "NSError"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSDockTile", "NSResponder"] }
+objc2-user-notifications = { workspace = true, features = ["block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger"] }
+block2.workspace = true
 
 [lints]
 workspace = true

@@ -1,86 +1,153 @@
-//! Anveg Code — Milestone 1 terminal spike.
+//! Anveg Code: a lightweight desktop app for managing Claude Code sessions.
 //!
-//! One window with two tabs: **Claude** runs `claude` and **Terminal** runs
-//! the user's login shell, each in the embedded terminal and each started
-//! the first time its tab is shown. This exists to validate the terminal
-//! (build plan, checklist 5.5) before the real app is built around it.
+//! One process for all windows. Each project gets a window with its
+//! sessions on the left and the selected session's real Claude Code UI on
+//! the right. See `docs/build-plan.md`.
 
+mod actions;
+mod dialogs;
 mod logging;
-mod spike;
+mod menus;
+mod model;
+mod panes;
+mod platform;
+mod project_window;
+mod settings_window;
+mod sidebar;
+mod ui;
+mod welcome;
+mod windows;
 
 use std::time::Instant;
 
-use gpui_kit::{
-    App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions, actions,
-    px, size,
-};
+use gpui_kit::{App, AppContext as _, PromptLevel};
 
-actions!(anveg, [Quit, ToggleTab, CloseWindow]);
+use crate::actions::*;
+use crate::model::{AppModel, ModelHandle, model};
 
 fn main() {
     let started = Instant::now();
-    let paths = anveg_core::paths::AppPaths::for_current_user();
-    let _log_guard = match &paths {
-        Ok(paths) => logging::init(paths),
+    let paths = match anveg_core::paths::AppPaths::for_current_user() {
+        Ok(paths) => paths,
         Err(error) => {
             logging::init_stderr();
-            tracing::warn!(%error, "no app directories; logging to stderr only");
-            None
+            tracing::error!(%error, "no home directory; cannot start");
+            return;
         }
     };
+    let _log_guard = logging::init(&paths);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Anveg Code starting");
 
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            anveg_term::init(cx);
-            install_menus_and_keys(cx);
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // Clicking the Dock icon with no windows open.
+    app.on_reopen(|cx| {
+        if cx.has_global::<ModelHandle>() && model(cx).read(cx).windows.is_empty() {
+            welcome::open(cx);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        anveg_term::init(cx);
+        actions::bind_keys(cx);
 
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1100.), px(720.)),
-                    cx,
-                ))),
-                ..gpui_cn::TitleBar::window_options(cx)
-            };
-            match gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| spike::SpikeWindow::new(window, cx))
-            }) {
-                Ok(_) => {
-                    tracing::info!(
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "first window opened"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(%error, "could not open the window");
-                    cx.quit();
-                }
-            }
-            cx.activate(true);
-        });
+        let app_model = cx.new(|cx| AppModel::new(paths, cx));
+        cx.set_global(ModelHandle(app_model));
+        install_actions(cx);
+        menus::install(cx);
+        platform::init(cx);
+
+        // Dock quit, logout and our own quit all end here: save and stop,
+        // never ask.
+        cx.on_app_quit(|cx| {
+            let model = model(cx);
+            model.update(cx, |m, cx| m.on_app_quit(cx));
+            async {}
+        })
+        .detach();
+
+        let opened = windows::restore(cx);
+        if opened == 0 {
+            welcome::open(cx);
+        }
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            windows = opened,
+            "first window opened"
+        );
+        cx.activate(true);
+    });
 }
 
-fn install_menus_and_keys(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-t", ToggleTab, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
-    ]);
-    cx.set_menus([
-        Menu::new("Anveg Code").items([MenuItem::action("Quit Anveg Code", Quit)]),
-        Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]),
-        Menu::new("View").items([MenuItem::action("Toggle Claude/Terminal", ToggleTab)]),
-    ]);
-    // macOS keeps an app alive without windows; for the spike, closing the
-    // only window quits.
-    cx.on_window_closed(|cx, _| {
-        if cx.windows().is_empty() {
-            cx.quit();
+fn install_actions(cx: &mut App) {
+    // Deferred: a global action runs while GPUI is still dispatching in the
+    // window it came from, and that window can't be updated until then.
+    cx.on_action(|_: &Quit, cx| cx.defer(request_quit));
+    cx.on_action(|_: &OpenFolder, cx| windows::prompt_open_folder(cx));
+    cx.on_action(|_: &OpenSettings, cx| settings_window::open(cx));
+    cx.on_action(|action: &OpenRecent, cx| {
+        windows::open_project(action.project_id, None, Vec::new(), cx)
+    });
+    cx.on_action(|_: &ClearRecent, cx| {
+        let model = model(cx);
+        let open: Vec<_> = model
+            .read(cx)
+            .windows
+            .iter()
+            .map(|w| w.project_id)
+            .collect();
+        model.update(cx, |m, cx| {
+            m.update_projects(cx, |p| p.projects.retain(|x| open.contains(&x.id)))
+        });
+    });
+    cx.on_action(|_: &About, cx| {
+        let version = env!("CARGO_PKG_VERSION");
+        let claude = model(cx)
+            .read(cx)
+            .claude
+            .as_ref()
+            .and_then(|c| c.version.clone())
+            .unwrap_or_else(|| "not found".into());
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, cx| {
+                drop(window.prompt(
+                    PromptLevel::Info,
+                    &format!("Anveg Code {version}"),
+                    Some(&format!(
+                        "Claude Code: {claude}\n\nA lightweight home for your Claude Code sessions."
+                    )),
+                    &["OK"],
+                    cx,
+                ));
+            });
         }
-    })
-    .detach();
+    });
+}
+
+/// ⌘Q: ask first when sessions are running (and the setting is on).
+fn request_quit(cx: &mut App) {
+    tracing::debug!("quit requested");
+    let model = model(cx);
+    let running = model.read(cx).running_sessions(cx);
+    let confirm = model.read(cx).settings.confirm_on_close;
+    if running.is_empty() || !confirm {
+        model.update(cx, |m, cx| m.quit_now(cx));
+        return;
+    }
+    let names: Vec<String> = running.iter().flat_map(|(_, n)| n.clone()).collect();
+    let target = cx
+        .active_window()
+        .filter(|a| running.iter().any(|(h, _)| h == a))
+        .unwrap_or(running[0].0);
+    let view = model
+        .read(cx)
+        .windows
+        .iter()
+        .find(|w| w.handle == target)
+        .map(|w| w.view.clone());
+    let _ = target.update(cx, |_, window, cx| {
+        window.activate_window();
+        if let Some(view) = view {
+            let _ = view.update(cx, |v, cx| v.ask_quit(names, cx));
+        }
+    });
 }

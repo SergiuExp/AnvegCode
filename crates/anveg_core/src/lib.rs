@@ -2,5 +2,14 @@
 //!
 //! Nothing in this crate depends on GPUI. Everything here is unit-tested.
 
+pub mod atomic;
+pub mod claude_env;
+pub mod config;
 pub mod launcher;
 pub mod paths;
+pub mod procinfo;
+pub mod session_index;
+pub mod status;
+pub mod time;
+pub mod transcripts;
+pub mod watcher;

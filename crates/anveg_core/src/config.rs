@@ -1,0 +1,426 @@
+//! The app's own files: `settings.json`, `projects.json` and `state.json`
+//! (build plan, sections 6.1, 6.8 and 11). Every write is atomic.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::atomic;
+use crate::time::now_millis;
+
+// ---------------------------------------------------------------------------
+// settings.json
+// ---------------------------------------------------------------------------
+
+/// Terminal preferences (Settings ▸ Terminal).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalPrefs {
+    pub font_family: String,
+    pub font_size: f32,
+    pub scrollback_lines: usize,
+    pub cursor_blink: bool,
+    pub option_as_meta: bool,
+}
+
+impl Default for TerminalPrefs {
+    fn default() -> Self {
+        Self {
+            font_family: "Menlo".to_owned(),
+            font_size: 13.0,
+            scrollback_lines: 10_000,
+            cursor_blink: false,
+            option_as_meta: true,
+        }
+    }
+}
+
+/// Everything in Settings (⌘,).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Ask before stopping running sessions on close or quit.
+    pub confirm_on_close: bool,
+    /// Resume the sessions that were running when the app quit.
+    pub resume_on_launch: bool,
+    /// Path to `claude`; `None` means auto-detect on `PATH`.
+    pub claude_path: Option<PathBuf>,
+    /// Extra flags for every `claude` launch, split with shell rules.
+    pub default_flags: String,
+    /// Show sessions started with `claude -p` or the Agent SDK.
+    pub show_noninteractive: bool,
+    pub terminal: TerminalPrefs,
+    /// Phase 2: notify when a hidden session needs input or finishes.
+    pub notifications: bool,
+    /// Phase 2: stop idle, hidden sessions after this many minutes (0 = never).
+    pub idle_stop_minutes: u32,
+    /// Phase 2: show each running session's memory in its tooltip.
+    pub show_memory: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            confirm_on_close: true,
+            resume_on_launch: false,
+            claude_path: None,
+            default_flags: String::new(),
+            show_noninteractive: false,
+            terminal: TerminalPrefs::default(),
+            notifications: true,
+            idle_stop_minutes: 30,
+            show_memory: false,
+        }
+    }
+}
+
+impl Settings {
+    pub fn load(path: &Path) -> Self {
+        atomic::read_json_or_default(path)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        atomic::write_json(path, self)
+    }
+
+    /// The default flags split into arguments. Invalid quoting gives an
+    /// error message for the Settings window.
+    pub fn default_flag_args(&self) -> std::result::Result<Vec<String>, String> {
+        shell_words::split(&self.default_flags).map_err(|e| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// projects.json
+// ---------------------------------------------------------------------------
+
+/// A project: one main folder plus optional extra folders.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Uuid,
+    pub name: String,
+    /// Canonicalized once, when the project is added. Every `claude` runs
+    /// with exactly this working directory.
+    pub main_folder: PathBuf,
+    #[serde(default)]
+    pub extra_folders: Vec<PathBuf>,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    /// Unix milliseconds.
+    pub last_opened_at: i64,
+}
+
+impl Project {
+    /// A new project for an already-canonical folder.
+    pub fn new(main_folder: PathBuf) -> Self {
+        let name = main_folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| main_folder.display().to_string());
+        let now = now_millis();
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            main_folder,
+            extra_folders: Vec::new(),
+            created_at: now,
+            last_opened_at: now,
+        }
+    }
+
+    /// Whether the main folder still exists.
+    pub fn folder_exists(&self) -> bool {
+        self.main_folder.is_dir()
+    }
+}
+
+/// The list of known projects.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectStore {
+    pub projects: Vec<Project>,
+}
+
+impl ProjectStore {
+    pub fn load(path: &Path) -> Self {
+        atomic::read_json_or_default(path)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        atomic::write_json(path, self)
+    }
+
+    pub fn get(&self, id: Uuid) -> Option<&Project> {
+        self.projects.iter().find(|p| p.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: Uuid) -> Option<&mut Project> {
+        self.projects.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn find_by_folder(&self, canonical: &Path) -> Option<&Project> {
+        self.projects.iter().find(|p| p.main_folder == canonical)
+    }
+
+    /// The project for `folder`, creating it if needed. `folder` is
+    /// canonicalized first. Returns the project's id.
+    pub fn open_folder(&mut self, folder: &Path) -> Result<Uuid> {
+        let canonical = std::fs::canonicalize(folder)?;
+        let id = match self.find_by_folder(&canonical) {
+            Some(project) => project.id,
+            None => {
+                let project = Project::new(canonical);
+                let id = project.id;
+                self.projects.push(project);
+                id
+            }
+        };
+        self.touch(id);
+        Ok(id)
+    }
+
+    /// Mark a project as just opened.
+    pub fn touch(&mut self, id: Uuid) {
+        if let Some(project) = self.get_mut(id) {
+            project.last_opened_at = now_millis();
+        }
+    }
+
+    /// Remove a project from the list (its files are untouched).
+    pub fn remove(&mut self, id: Uuid) {
+        self.projects.retain(|p| p.id != id);
+    }
+
+    /// Projects, most recently opened first.
+    pub fn recent(&self) -> Vec<&Project> {
+        let mut list: Vec<&Project> = self.projects.iter().collect();
+        list.sort_by_key(|p| std::cmp::Reverse(p.last_opened_at));
+        list
+    }
+}
+
+// ---------------------------------------------------------------------------
+// state.json
+// ---------------------------------------------------------------------------
+
+/// Which tab the right side shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RightTab {
+    #[default]
+    Claude,
+    Terminal,
+}
+
+/// A window's frame in screen points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// What one pane shows (Phase 3 split view).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneContent {
+    Session { session_id: String },
+    Terminal { index: usize },
+}
+
+/// One open project window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub project_id: Uuid,
+    #[serde(default)]
+    pub bounds: Option<SavedBounds>,
+    #[serde(default)]
+    pub selected_session: Option<String>,
+    #[serde(default)]
+    pub active_tab: RightTab,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    /// Sessions running when the app quit (for "resume on launch").
+    #[serde(default)]
+    pub running_sessions: Vec<String>,
+    /// Phase 3: how many terminal tabs were open (restored as fresh shells).
+    #[serde(default = "one")]
+    pub terminal_tabs: usize,
+    /// Phase 3: the second pane, when the view is split.
+    #[serde(default)]
+    pub split: Option<PaneContent>,
+    /// Phase 3: the split ratio of the first pane (0.2–0.8).
+    #[serde(default = "half")]
+    pub split_ratio: f32,
+}
+
+fn default_sidebar_width() -> f32 {
+    260.0
+}
+
+fn one() -> usize {
+    1
+}
+
+fn half() -> f32 {
+    0.5
+}
+
+impl WindowState {
+    pub fn new(project_id: Uuid) -> Self {
+        Self {
+            project_id,
+            bounds: None,
+            selected_session: None,
+            active_tab: RightTab::Claude,
+            sidebar_width: default_sidebar_width(),
+            running_sessions: Vec::new(),
+            terminal_tabs: 1,
+            split: None,
+            split_ratio: 0.5,
+        }
+    }
+}
+
+/// `state.json`: the windows to reopen on launch.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppState {
+    pub windows: Vec<WindowState>,
+}
+
+impl AppState {
+    pub fn load(path: &Path) -> Self {
+        atomic::read_json_or_default(path)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        atomic::write_json(path, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_defaults_match_the_plan() {
+        let s = Settings::default();
+        assert!(s.confirm_on_close);
+        assert!(!s.resume_on_launch);
+        assert_eq!(s.terminal.font_family, "Menlo");
+        assert_eq!(s.terminal.font_size, 13.0);
+        assert_eq!(s.terminal.scrollback_lines, 10_000);
+        assert!(!s.terminal.cursor_blink);
+        assert!(s.terminal.option_as_meta);
+        assert_eq!(s.idle_stop_minutes, 30);
+    }
+
+    #[test]
+    fn settings_round_trip_and_tolerate_missing_fields() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("settings.json");
+        let s = Settings {
+            default_flags: "--permission-mode plan".into(),
+            ..Settings::default()
+        };
+        s.save(&path)?;
+        assert_eq!(Settings::load(&path), s);
+
+        std::fs::write(&path, r#"{"confirm_on_close": false, "unknown_key": 1}"#)?;
+        let loaded = Settings::load(&path);
+        assert!(!loaded.confirm_on_close);
+        assert_eq!(loaded.terminal, TerminalPrefs::default());
+        Ok(())
+    }
+
+    #[test]
+    fn default_flags_split_with_shell_rules() {
+        let s = Settings {
+            default_flags: r#"--permission-mode plan --append-system-prompt "be brief""#.into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            s.default_flag_args(),
+            Ok(vec![
+                "--permission-mode".to_owned(),
+                "plan".to_owned(),
+                "--append-system-prompt".to_owned(),
+                "be brief".to_owned(),
+            ])
+        );
+        let bad = Settings {
+            default_flags: "\"unterminated".into(),
+            ..Settings::default()
+        };
+        assert!(bad.default_flag_args().is_err());
+    }
+
+    #[test]
+    fn opening_the_same_folder_twice_gives_one_project() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let folder = dir.path().join("my-app");
+        std::fs::create_dir(&folder)?;
+        let mut store = ProjectStore::default();
+        let a = store.open_folder(&folder)?;
+        // A different spelling of the same folder.
+        let b = store.open_folder(&folder.join("."))?;
+        assert_eq!(a, b);
+        assert_eq!(store.projects.len(), 1);
+        let project = store.get(a).map(|p| p.name.clone());
+        assert_eq!(project.as_deref(), Some("my-app"));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_orders_by_last_opened() {
+        let mut store = ProjectStore::default();
+        let mut a = Project::new("/a".into());
+        a.last_opened_at = 1;
+        let mut b = Project::new("/b".into());
+        b.last_opened_at = 2;
+        store.projects = vec![a, b];
+        let names: Vec<_> = store.recent().iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn state_round_trip() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.json");
+        let mut w = WindowState::new(Uuid::new_v4());
+        w.bounds = Some(SavedBounds {
+            x: 10.0,
+            y: 20.0,
+            width: 800.0,
+            height: 600.0,
+            maximized: false,
+        });
+        w.selected_session = Some("abc".into());
+        w.active_tab = RightTab::Terminal;
+        w.running_sessions = vec!["abc".into()];
+        w.split = Some(PaneContent::Terminal { index: 0 });
+        let state = AppState { windows: vec![w] };
+        state.save(&path)?;
+        assert_eq!(AppState::load(&path), state);
+        Ok(())
+    }
+
+    #[test]
+    fn old_state_files_get_defaults() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.json");
+        let id = Uuid::new_v4();
+        std::fs::write(&path, format!(r#"{{"windows":[{{"project_id":"{id}"}}]}}"#))?;
+        let state = AppState::load(&path);
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.windows[0].sidebar_width, 260.0);
+        assert_eq!(state.windows[0].terminal_tabs, 1);
+        Ok(())
+    }
+}

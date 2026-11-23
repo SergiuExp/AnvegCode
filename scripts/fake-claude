@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# A stand-in for `claude` for tests and UI checks (build plan, section 10).
+# No network, no model calls.
+#
+#   fake-claude --version | auth status | agents --json
+#   fake-claude [--session-id ID] [--resume ID [--fork-session]] [--name N]
+#               [--worktree W] [--add-dir D]... [--settings F] [other flags]
+#
+# It prints its arguments, writes a JSONL transcript under
+# $CLAUDE_CONFIG_DIR/projects/<encoded cwd>/<id>.jsonl, echoes each input
+# line, records `/rename x` as a custom-title entry, and exits on `/exit`.
+# When `--settings` names a hooks file and $ANVEG_HOOK_SOCKET is set, it
+# runs that file's first hook command for SessionStart, UserPromptSubmit,
+# Stop and SessionEnd (needs python3 to read the JSON; skipped otherwise).
+set -u
+
+CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+
+case "${1:-}" in
+  --version) echo "0.0.0-fake (Claude Code)"; exit 0 ;;
+  auth) printf '{"loggedIn": true, "configDirectory": "%s"}\n' "$CONFIG_DIR"; exit 0 ;;
+  agents) echo "[]"; exit 0 ;;
+esac
+
+session_id=""
+resume_id=""
+fork=0
+name=""
+worktree=""
+settings=""
+args=("$@")
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id) session_id=$2; shift 2 ;;
+    --resume|-r) resume_id=$2; shift 2 ;;
+    --fork-session) fork=1; shift ;;
+    --name|-n) name=$2; shift 2 ;;
+    --worktree|-w) worktree=$2; shift 2 ;;
+    --settings) settings=$2; shift 2 ;;
+    --add-dir) shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ -z "$session_id" ]; then
+  if [ -n "$resume_id" ] && [ "$fork" = 0 ]; then
+    session_id=$resume_id
+  else
+    session_id=$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' || cat /proc/sys/kernel/random/uuid)
+  fi
+fi
+
+if [ -n "$worktree" ]; then
+  mkdir -p ".claude/worktrees/$worktree" && cd ".claude/worktrees/$worktree" || exit 1
+fi
+
+encoded=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
+dir="$CONFIG_DIR/projects/$encoded"
+file="$dir/$session_id.jsonl"
+mkdir -p "$dir"
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
+
+hook() { # event [extra json fields]
+  [ -n "$settings" ] && [ -n "${ANVEG_HOOK_SOCKET:-}" ] && [ -f "$settings" ] || return 0
+  command -v python3 >/dev/null || return 0
+  local cmd
+  cmd=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["hooks"][sys.argv[2]][0]["hooks"][0]["command"])' "$settings" "$1" 2>/dev/null) || return 0
+  printf '{"session_id":"%s","hook_event_name":"%s","cwd":"%s"%s}' "$session_id" "$1" "$(json_escape "$PWD")" "${2:-}" | sh -c "$cmd" >/dev/null 2>&1
+}
+
+echo "fake-claude: session $session_id"
+echo "fake-claude: args: ${args[*]:-}"
+echo "fake-claude: transcript $file"
+if [ -n "$name" ]; then
+  printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$(json_escape "$name")" "$session_id" >> "$file"
+fi
+hook SessionStart ',"source":"startup"'
+trap 'hook SessionEnd ",\"reason\":\"other\""; exit 0' HUP TERM
+
+printf '> '
+while IFS= read -r line; do
+  line=${line%$'\r'}
+  case "$line" in
+    /exit) hook SessionEnd ',"reason":"prompt_input_exit"'; echo "bye"; exit 0 ;;
+    /rename\ *)
+      title=${line#/rename }
+      printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$(json_escape "$title")" "$session_id" >> "$file"
+      echo "Session renamed to: $title" ;;
+    "") ;;
+    *)
+      hook UserPromptSubmit
+      printf '{"type":"user","message":{"role":"user","content":"%s"},"timestamp":"%s","cwd":"%s","sessionId":"%s","entrypoint":"cli","isSidechain":false}\n' \
+        "$(json_escape "$line")" "$(now)" "$(json_escape "$PWD")" "$session_id" >> "$file"
+      echo "echo: $line"
+      hook Stop ;;
+  esac
+  printf '> '
+done
+hook SessionEnd ',"reason":"other"'

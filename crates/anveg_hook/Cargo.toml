@@ -1,0 +1,24 @@
+[package]
+name = "anveg_hook"
+description = "Tiny helper that Claude Code runs for each hook event; forwards it to Anveg Code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "anveg-hook"
+path = "src/main.rs"
+
+# Deliberately only std + serde_json: it must start and finish in well under 20 ms.
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+anveg_core.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true

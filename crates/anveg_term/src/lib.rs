@@ -132,7 +132,7 @@ pub struct TerminalView {
     id: ElementId,
     state: Entity<TerminalState>,
     option_as_meta: bool,
-    _events: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -153,11 +153,13 @@ impl TerminalView {
         let events = cx.subscribe(&state, |this, state, event, cx| {
             this.forward(&state, event, cx);
         });
+        // Redraw this view when a new frame arrives.
+        let frames = cx.observe(&state, |_, _, cx| cx.notify());
         Self {
             id: id.into(),
             state,
             option_as_meta: settings.option_as_meta,
-            _events: events,
+            _subscriptions: [events, frames],
         }
     }
 
@@ -206,6 +208,20 @@ impl TerminalView {
     /// Whether the program is starting or running.
     pub fn is_running(&self, cx: &App) -> bool {
         matches!(self.run_state(cx), RunState::Starting | RunState::Running)
+    }
+
+    /// The process in the terminal's foreground (the program itself while
+    /// it runs), for memory sampling.
+    pub fn foreground_pid(&self, cx: &App) -> Option<u32> {
+        self.state.read(cx).foreground().map(|p| p.pid())
+    }
+
+    /// Apply new font settings to a running terminal.
+    pub fn apply_settings(&mut self, settings: &TerminalSettings, cx: &mut Context<Self>) {
+        self.option_as_meta = settings.option_as_meta;
+        let appearance = appearance(settings);
+        self.state
+            .update(cx, |state, cx| state.set_appearance(appearance, cx));
     }
 
     /// The title the program set.
@@ -296,6 +312,9 @@ fn local_options(spec: &LaunchSpec, settings: &TerminalSettings) -> LocalTermina
     }
     for (name, value) in &spec.env {
         options = options.with_env(name.clone(), value.clone());
+    }
+    for name in &spec.env_remove {
+        options = options.without_env(name.clone());
     }
     options
 }

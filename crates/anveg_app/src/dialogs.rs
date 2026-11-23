@@ -1,0 +1,466 @@
+//! The window's modal dialogs.
+
+use anveg_core::launcher;
+use gpui_cn::prelude::*;
+use gpui_cn::{Dialog, Input, InputEvent, InputState};
+use gpui_kit::{
+    AnyElement, AppContext as _, Context, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Styled as _, Window, div,
+};
+
+use crate::project_window::{DialogKind, ProjectWindow};
+use crate::ui::Colors;
+
+impl ProjectWindow {
+    /// ⌘N (or New Session in Worktree…).
+    pub fn begin_new_session(
+        &mut self,
+        in_worktree: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if in_worktree && !self.is_git_repo(cx) {
+            self.show_message(
+                "Not a git repository",
+                "Worktree sessions need the project's main folder to be a git repository.",
+                cx,
+            );
+            return;
+        }
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name (optional)"));
+        let sub = cx.subscribe_in(&name, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_new_session(window, cx);
+            }
+        });
+        self.push_subscription(sub);
+        let worktree = in_worktree.then(|| {
+            let input = cx
+                .new(|cx| InputState::new(window, cx).placeholder("Worktree name, e.g. feature-x"));
+            let sub = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.commit_new_session(window, cx);
+                }
+            });
+            self.push_subscription(sub);
+            input
+        });
+        self.dialog = Some(DialogKind::NewSession {
+            name,
+            worktree,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    pub fn commit_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::debug!(dialog = self.dialog.is_some(), "commit new session");
+        let Some(DialogKind::NewSession { name, worktree, .. }) = &self.dialog else {
+            return;
+        };
+        let raw_name = name.read(cx).value().to_string();
+        let name = if raw_name.trim().is_empty() {
+            None
+        } else {
+            match launcher::normalize_name(&raw_name) {
+                Ok(n) => Some(n),
+                Err(message) => return self.set_dialog_error(message, cx),
+            }
+        };
+        let worktree = match worktree {
+            Some(input) => match launcher::normalize_worktree_name(&input.read(cx).value()) {
+                Ok(w) => Some(w),
+                Err(message) => return self.set_dialog_error(message, cx),
+            },
+            None => None,
+        };
+        self.dialog = None;
+        self.new_session(name, worktree, window, cx);
+    }
+
+    fn set_dialog_error(&mut self, message: &str, cx: &mut Context<Self>) {
+        match &mut self.dialog {
+            Some(DialogKind::NewSession { error, .. })
+            | Some(DialogKind::Rename { error, .. })
+            | Some(DialogKind::ProjectSettings { error, .. }) => {
+                *error = Some(SharedString::from(message.to_owned()))
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    pub fn begin_project_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.project_name(cx);
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let sub = cx.subscribe_in(&name, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_project_settings(window, cx);
+            }
+        });
+        self.push_subscription(sub);
+        self.dialog = Some(DialogKind::ProjectSettings { name, error: None });
+        cx.notify();
+    }
+
+    fn commit_project_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(DialogKind::ProjectSettings { name, .. }) = &self.dialog else {
+            return;
+        };
+        let value = name.read(cx).value().trim().to_owned();
+        if value.is_empty() {
+            return self.set_dialog_error("The name can't be empty.", cx);
+        }
+        let id = self.project_id;
+        self.model.update(cx, |m, cx| {
+            m.update_projects(cx, |p| {
+                if let Some(project) = p.get_mut(id) {
+                    project.name = value.clone();
+                }
+            })
+        });
+        self.close_dialog(window, cx);
+    }
+
+    fn add_extra_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let id = this.project_id;
+                this.model.update(cx, |m, cx| {
+                    m.update_projects(cx, |p| {
+                        if let Some(project) = p.get_mut(id) {
+                            for path in paths {
+                                let path = std::fs::canonicalize(&path).unwrap_or(path);
+                                if path != project.main_folder
+                                    && !project.extra_folders.contains(&path)
+                                {
+                                    project.extra_folders.push(path);
+                                }
+                            }
+                        }
+                    })
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_extra_folder(&mut self, index: usize, cx: &mut Context<Self>) {
+        let id = self.project_id;
+        self.model.update(cx, |m, cx| {
+            m.update_projects(cx, |p| {
+                if let Some(project) = p.get_mut(id)
+                    && index < project.extra_folders.len()
+                {
+                    project.extra_folders.remove(index);
+                }
+            })
+        });
+        cx.notify();
+    }
+
+    /// Enter in a dialog: gpui-base's dialog turns it into `Confirm` (and
+    /// would just close); route it to the dialog's own action instead.
+    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.dialog {
+            Some(DialogKind::NewSession { .. }) => self.commit_new_session(window, cx),
+            Some(DialogKind::Rename { .. }) => self.commit_rename(window, cx),
+            Some(DialogKind::ProjectSettings { .. }) => self.commit_project_settings(window, cx),
+            Some(DialogKind::Message { .. }) => self.close_dialog(window, cx),
+            // Destructive or two-way choices need a click.
+            _ => {}
+        }
+    }
+
+    pub fn render_dialog(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let c = Colors::of(cx);
+        let form = |cx: &mut Context<Self>| {
+            div().flex().flex_col().gap_2().on_action(cx.listener(
+                |this, _: &gpui_kit::base::actions::Confirm, window, cx| {
+                    this.confirm_dialog(window, cx)
+                },
+            ))
+        };
+        let dialog = self.dialog.as_ref()?;
+        let close = cx.listener(|this, _, window, cx| this.close_dialog(window, cx));
+        let weak = cx.entity().downgrade();
+        let on_open_change = move |open: bool, window: &mut Window, cx: &mut gpui_kit::App| {
+            if !open {
+                let _ = weak.update(cx, |this, cx| this.close_dialog(window, cx));
+            }
+        };
+        let error_line = |error: &Option<SharedString>| {
+            error
+                .clone()
+                .map(|e| div().text_sm().text_color(c.destructive).child(e))
+        };
+        let names_list = |names: &[String]| {
+            let shown: Vec<_> = names.iter().take(12).cloned().collect();
+            let more = names.len().saturating_sub(shown.len());
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .text_sm()
+                .children(
+                    shown
+                        .into_iter()
+                        .map(|n| div().truncate().child(format!("• {n}"))),
+                )
+                .when(more > 0, |el| {
+                    el.child(
+                        div()
+                            .text_color(c.muted_foreground)
+                            .child(format!("and {more} more")),
+                    )
+                })
+        };
+        let el: AnyElement = match dialog {
+            DialogKind::NewSession { name, worktree, error } => {
+                let title = if worktree.is_some() {
+                    "New Session in Worktree"
+                } else {
+                    "New Session"
+                };
+                let focus = worktree
+                    .as_ref()
+                    .map(|w| w.read(cx).focus_handle(cx))
+                    .unwrap_or_else(|| name.read(cx).focus_handle(cx));
+                Dialog::new("dlg-new")
+                    .open(true)
+                    .on_open_change(on_open_change)
+                    .title(title)
+                    .track_focus(&focus)
+                    .child(
+                        form(cx)
+                            .when_some(worktree.clone(), |d, w| {
+                                d.child(Input::new(&w)).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(c.muted_foreground)
+                                        .child("Runs `claude --worktree <name>`, which creates <project>/.claude/worktrees/<name>."),
+                                )
+                            })
+                            .child(Input::new(name))
+                            .children(error_line(error)),
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("dlg-new-cancel").outline().label("Cancel").on_click(close))
+                            .child(
+                                Button::new("dlg-new-ok")
+                                    .primary()
+                                    .label("Start")
+                                    .on_click(cx.listener(|this, _, window, cx| this.commit_new_session(window, cx))),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            DialogKind::Rename { input, error, .. } => Dialog::new("dlg-rename")
+                .open(true)
+                .on_open_change(on_open_change)
+                .title("Rename Session")
+                .description(
+                    "Saved in Anveg Code at once. If the session is running, `/rename` is also sent to Claude Code; \
+                     text you haven't sent yet in Claude's prompt would be added to it.",
+                )
+                .track_focus(&input.read(cx).focus_handle(cx))
+                .child(form(cx).child(Input::new(input)).children(error_line(error)))
+                .footer(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("dlg-rename-cancel").outline().label("Cancel").on_click(close))
+                        .child(
+                            Button::new("dlg-rename-ok")
+                                .primary()
+                                .label("Rename")
+                                .on_click(cx.listener(|this, _, window, cx| this.commit_rename(window, cx))),
+                        ),
+                )
+                .into_any_element(),
+            DialogKind::Delete { names, .. } => Dialog::new("dlg-delete")
+                .open(true)
+                .on_open_change(on_open_change)
+                .title(format!(
+                    "Delete {} session{}?",
+                    names.len(),
+                    if names.len() == 1 { "" } else { "s" }
+                ))
+                .description("Their transcripts will be moved to the Trash. Running sessions are stopped first.")
+                .child(names_list(names))
+                .footer(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("dlg-delete-cancel").outline().label("Cancel").on_click(close))
+                        .child(
+                            Button::new("dlg-delete-ok")
+                                .destructive()
+                                .label("Move to Trash")
+                                .on_click(cx.listener(|this, _, window, cx| this.confirm_delete(window, cx))),
+                        ),
+                )
+                .into_any_element(),
+            DialogKind::ConfirmClose { names, quit, dont_ask } => {
+                let quit = *quit;
+                let dont_ask = *dont_ask;
+                Dialog::new("dlg-close")
+                    .open(true)
+                    .on_open_change(on_open_change)
+                    .title(format!(
+                        "Stop {} running session{}?",
+                        names.len(),
+                        if names.len() == 1 { "" } else { "s" }
+                    ))
+                    .description("You can resume them later.")
+                    .child(names_list(names))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .child(
+                                Switch::new("dlg-close-dont-ask")
+                                    .checked(dont_ask)
+                                    .accessibility_label("Don't show this again")
+                                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                        if let Some(DialogKind::ConfirmClose { dont_ask, .. }) = &mut this.dialog {
+                                            *dont_ask = *checked;
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .child("Don't show this again"),
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("dlg-close-cancel").outline().label("Cancel").on_click(close))
+                            .child(
+                                Button::new("dlg-close-ok")
+                                    .destructive()
+                                    .label(if quit { "Stop and Quit" } else { "Stop and Close" })
+                                    .on_click(cx.listener(|this, _, window, cx| this.confirm_close(window, cx))),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            DialogKind::OpenElsewhere { session_id } => {
+                let id = session_id.clone();
+                Dialog::new("dlg-elsewhere")
+                    .open(true)
+                    .on_open_change(on_open_change)
+                    .title("This session is open somewhere else")
+                    .description(
+                        "Opening it here too would mix both conversations into one transcript. \
+                         You can open a copy (a fork) instead.",
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("dlg-else-cancel").outline().label("Cancel").on_click(close))
+                            .child(
+                                Button::new("dlg-else-fork")
+                                    .primary()
+                                    .label("Open a Copy (Fork)")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.dialog = None;
+                                        this.fork_session(&id, window, cx);
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            DialogKind::ProjectSettings { name, error } => {
+                let project = self.project(cx);
+                let main = project
+                    .as_ref()
+                    .map(|p| p.main_folder.display().to_string())
+                    .unwrap_or_default();
+                let extras: Vec<String> = project
+                    .map(|p| p.extra_folders.iter().map(|f| f.display().to_string()).collect())
+                    .unwrap_or_default();
+                Dialog::new("dlg-project")
+                    .open(true)
+                    .on_open_change(on_open_change)
+                    .title("Project Settings")
+                    .track_focus(&name.read(cx).focus_handle(cx))
+                    .child(div().text_sm().text_color(c.muted_foreground).child("Name"))
+                    .child(form(cx).child(Input::new(name)).children(error_line(error)))
+                    .child(div().pt_2().text_sm().text_color(c.muted_foreground).child("Main folder"))
+                    .child(div().text_sm().truncate().child(main))
+                    .child(div().pt_2().text_sm().text_color(c.muted_foreground).child("Extra folders (--add-dir)"))
+                    .children(extras.into_iter().enumerate().map(|(i, folder)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().truncate().text_sm().child(folder))
+                            .child(
+                                Button::new(SharedString::from(format!("rm-folder-{i}")))
+                                    .ghost()
+                                    .size(ButtonSize::Sm)
+                                    .label("Remove")
+                                    .on_click(cx.listener(move |this, _, _, cx| this.remove_extra_folder(i, cx))),
+                            )
+                    }))
+                    .child(
+                        div().child(
+                            Button::new("add-folder")
+                                .outline()
+                                .size(ButtonSize::Sm)
+                                .label("Add Folder…")
+                                .on_click(cx.listener(|this, _, window, cx| this.add_extra_folder(window, cx))),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child("Folder changes apply to sessions started or resumed afterwards."),
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("dlg-project-cancel").outline().label("Cancel").on_click(close))
+                            .child(
+                                Button::new("dlg-project-ok")
+                                    .primary()
+                                    .label("Save")
+                                    .on_click(cx.listener(|this, _, window, cx| this.commit_project_settings(window, cx))),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            DialogKind::Message { title, body } => Dialog::new("dlg-message")
+                .open(true)
+                .on_open_change(on_open_change)
+                .title(title.clone())
+                .description(body.clone())
+                .footer(Button::new("dlg-message-ok").primary().label("OK").on_click(close))
+                .into_any_element(),
+        };
+        Some(el)
+    }
+}

@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/anveg_core", "crates/anveg_term", "crates/anveg_app"]
+members = ["crates/anveg_core", "crates/anveg_term", "crates/anveg_app", "crates/anveg_hook"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 license = "Apache-2.0"
 publish = false
 
@@ -29,6 +29,16 @@ tracing-appender = "0.2"
 directories = "6"
 shell-words = "1"
 tempfile = "3"
+futures = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-user-notifications = "0.3"
+block2 = "0.6"
+notify = "8.2"
+notify-debouncer-full = "0.7"
+trash = "5"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
