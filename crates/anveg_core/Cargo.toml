@@ -19,6 +19,10 @@ notify.workspace = true
 notify-debouncer-full.workspace = true
 trash.workspace = true
 sysinfo.workspace = true
+tempfile.workspace = true
+ignore.workspace = true
+nucleo-matcher.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
