@@ -12,14 +12,20 @@ use crate::project_window::{DialogKind, ProjectWindow};
 use crate::ui::Colors;
 
 impl ProjectWindow {
-    /// ⌘N (or New Session in Worktree…).
+    /// ⌘N starts a session at once, with no questions: its name comes from
+    /// Claude Code (a custom or generated title) or, until then, from its
+    /// first prompt. New Session in Worktree… asks only for the worktree.
     pub fn begin_new_session(
         &mut self,
         in_worktree: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if in_worktree && !self.is_git_repo(cx) {
+        if !in_worktree {
+            self.new_session(None, None, window, cx);
+            return;
+        }
+        if !self.is_git_repo(cx) {
             self.show_message(
                 "Not a git repository",
                 "Worktree sessions need the project's main folder to be a git repository.",
@@ -27,26 +33,15 @@ impl ProjectWindow {
             );
             return;
         }
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name (optional)"));
-        let sub = cx.subscribe_in(&name, window, |this, _, event, window, cx| {
+        let worktree =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Worktree name, e.g. feature-x"));
+        let sub = cx.subscribe_in(&worktree, window, |this, _, event, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 this.commit_new_session(window, cx);
             }
         });
         self.push_subscription(sub);
-        let worktree = in_worktree.then(|| {
-            let input = cx
-                .new(|cx| InputState::new(window, cx).placeholder("Worktree name, e.g. feature-x"));
-            let sub = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.commit_new_session(window, cx);
-                }
-            });
-            self.push_subscription(sub);
-            input
-        });
-        self.dialog = Some(DialogKind::NewSession {
-            name,
+        self.dialog = Some(DialogKind::NewWorktreeSession {
             worktree,
             error: None,
         });
@@ -54,33 +49,20 @@ impl ProjectWindow {
     }
 
     pub fn commit_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        tracing::debug!(dialog = self.dialog.is_some(), "commit new session");
-        let Some(DialogKind::NewSession { name, worktree, .. }) = &self.dialog else {
+        let Some(DialogKind::NewWorktreeSession { worktree, .. }) = &self.dialog else {
             return;
         };
-        let raw_name = name.read(cx).value().to_string();
-        let name = if raw_name.trim().is_empty() {
-            None
-        } else {
-            match launcher::normalize_name(&raw_name) {
-                Ok(n) => Some(n),
-                Err(message) => return self.set_dialog_error(message, cx),
-            }
-        };
-        let worktree = match worktree {
-            Some(input) => match launcher::normalize_worktree_name(&input.read(cx).value()) {
-                Ok(w) => Some(w),
-                Err(message) => return self.set_dialog_error(message, cx),
-            },
-            None => None,
+        let worktree = match launcher::normalize_worktree_name(&worktree.read(cx).value()) {
+            Ok(w) => w,
+            Err(message) => return self.set_dialog_error(message, cx),
         };
         self.dialog = None;
-        self.new_session(name, worktree, window, cx);
+        self.new_session(None, Some(worktree), window, cx);
     }
 
     fn set_dialog_error(&mut self, message: &str, cx: &mut Context<Self>) {
         match &mut self.dialog {
-            Some(DialogKind::NewSession { error, .. })
+            Some(DialogKind::NewWorktreeSession { error, .. })
             | Some(DialogKind::Rename { error, .. })
             | Some(DialogKind::ProjectSettings { error, .. }) => {
                 *error = Some(SharedString::from(message.to_owned()))
@@ -173,7 +155,7 @@ impl ProjectWindow {
     /// would just close); route it to the dialog's own action instead.
     fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.dialog {
-            Some(DialogKind::NewSession { .. }) => self.commit_new_session(window, cx),
+            Some(DialogKind::NewWorktreeSession { .. }) => self.commit_new_session(window, cx),
             Some(DialogKind::Rename { .. }) => self.commit_rename(window, cx),
             Some(DialogKind::ProjectSettings { .. }) => self.commit_project_settings(window, cx),
             Some(DialogKind::Message { .. }) => self.close_dialog(window, cx),
@@ -230,48 +212,31 @@ impl ProjectWindow {
                 })
         };
         let el: AnyElement = match dialog {
-            DialogKind::NewSession { name, worktree, error } => {
-                let title = if worktree.is_some() {
-                    "New Session in Worktree"
-                } else {
-                    "New Session"
-                };
-                let focus = worktree
-                    .as_ref()
-                    .map(|w| w.read(cx).focus_handle(cx))
-                    .unwrap_or_else(|| name.read(cx).focus_handle(cx));
-                Dialog::new("dlg-new")
-                    .open(true)
-                    .on_open_change(on_open_change)
-                    .title(title)
-                    .track_focus(&focus)
-                    .child(
-                        form(cx)
-                            .when_some(worktree.clone(), |d, w| {
-                                d.child(Input::new(&w)).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(c.muted_foreground)
-                                        .child("Runs `claude --worktree <name>`, which creates <project>/.claude/worktrees/<name>."),
-                                )
-                            })
-                            .child(Input::new(name))
-                            .children(error_line(error)),
-                    )
-                    .footer(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Button::new("dlg-new-cancel").outline().label("Cancel").on_click(close))
-                            .child(
-                                Button::new("dlg-new-ok")
-                                    .primary()
-                                    .label("Start")
-                                    .on_click(cx.listener(|this, _, window, cx| this.commit_new_session(window, cx))),
-                            ),
-                    )
-                    .into_any_element()
-            }
+            DialogKind::NewWorktreeSession { worktree, error } => Dialog::new("dlg-new")
+                .open(true)
+                .on_open_change(on_open_change)
+                .title("New Session in Worktree")
+                .description(
+                    "Runs `claude --worktree <name>`, which creates <project>/.claude/worktrees/<name>. \
+                     The session is named after its first prompt.",
+                )
+                .track_focus(&worktree.read(cx).focus_handle(cx))
+                .child(form(cx).child(Input::new(worktree)).children(error_line(error)))
+                .footer(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("dlg-new-cancel").outline().label("Cancel").on_click(close))
+                        .child(
+                            Button::new("dlg-new-ok")
+                                .primary()
+                                .label("Start")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.commit_new_session(window, cx)
+                                })),
+                        ),
+                )
+                .into_any_element(),
             DialogKind::Rename { input, error, .. } => Dialog::new("dlg-rename")
                 .open(true)
                 .on_open_change(on_open_change)

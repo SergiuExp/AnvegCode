@@ -198,7 +198,7 @@ For each session, the app needs: display name, first prompt (used as a fallback 
 **Parser rules:**
 
 - Parse line by line into `serde_json::Value`. Skip lines that fail to parse. Ignore unknown entry types and fields. Never panic.
-- **Display-name precedence:** app alias → custom name → generated title or summary → first prompt (truncated to ~80 characters) → "Untitled session".
+- **Display-name precedence:** app alias → custom name → generated title or summary → first prompt (truncated to ~80 characters) → "New session".
 - **Last activity:** the newest timestamp seen; if there is none, the file's modification time.
 - **Incremental parsing.** Transcripts are append-only.
   - Cache, per file: `{size, mtime, parsed_offset, metadata}`.
@@ -287,7 +287,7 @@ Claude Code saves transcripts continuously while it runs, so a stopped session c
 - **Row contents:** display name, relative time ("5 min ago"), and a running dot (filled = process running). Tooltip: full name, session id, created time, last activity, git branch.
 - **Order:** most recent activity first. Sessions just created and not yet written to disk appear at the top.
 - **Filter field** at the top (⌘F focuses it): case-insensitive substring match on display name and first prompt.
-- **New session** (`+` button or ⌘N): a small popover with an optional name field; Enter starts the session (6.3).
+- **New session** (`+` button or ⌘N): starts at once, with no name prompt. The row reads "New session" until the first prompt, which then names it, unless Claude Code provides a name (revised 2026-11-23, see PROGRESS).
 - **Live updates:** `notify` watches the project's transcript directory, non-recursively.
   - If that directory doesn't exist yet, watch its parent until it appears.
   - Debounce events by 200 ms, then parse incrementally (5.3).
@@ -323,7 +323,7 @@ Claude Code saves transcripts continuously while it runs, so a stopped session c
   - **Phase 1:** send it immediately.
   - **Phase 2:** queue it until the session's status is *Idle* (7.1).
   - **Known limitation:** if the user has unsent text in Claude's prompt, the command is added to that text. Mention this in the rename field's help text.
-- New sessions that have a name pass it with `-n`, so Claude Code and the app agree from the start.
+- New sessions start without a name; renaming later sets both the alias and Claude Code's name.
 
 ### 6.6 Deleting sessions
 

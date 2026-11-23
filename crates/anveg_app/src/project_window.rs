@@ -100,9 +100,9 @@ pub enum Row {
 
 /// A modal dialog in the window.
 pub enum DialogKind {
-    NewSession {
-        name: Entity<InputState>,
-        worktree: Option<Entity<InputState>>,
+    /// New Session in Worktree…: asks only for the worktree's name.
+    NewWorktreeSession {
+        worktree: Entity<InputState>,
         error: Option<SharedString>,
     },
     Rename {
@@ -744,7 +744,9 @@ impl ProjectWindow {
                 name: name.clone(),
             },
         };
-        let display = name.clone().unwrap_or_else(|| "New session".to_owned());
+        let display = name
+            .clone()
+            .unwrap_or_else(|| anveg_core::session_index::UNTITLED.to_owned());
         self.add_placeholder(&session_id, &display, worktree.clone(), cx);
         if let Some(name) = &name
             && let Ok(mut index) = self.index.lock()

@@ -156,7 +156,7 @@ Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), 
 - `transcripts.rs`:
   - Path encoding (each non-alphanumeric UTF-16 unit becomes `-`). Names over 200 characters are found by prefix and confirmed by a recorded `cwd`.
   - A defensive incremental parser. It re-reads a half-written last line, starts over when a file was rewritten shorter, skips garbage and unknown entries, and skips meta, sidechain, tool-result and slash-command wrapper entries when looking for the first prompt.
-  - Display-name precedence: alias → custom name → generated title → first prompt (truncated to 80 characters) → "Untitled session".
+  - Display-name precedence: alias → custom name → generated title → first prompt (truncated to 80 characters) → "New session".
 - `session_index.rs`: the per-project list with aliases and a parse cache in `sessions/<project-id>.json`, worktree groups, and filtering.
 - `watcher.rs`: non-recursive watches on the transcript directories, `projects/` (to see a new directory appear) and `.claude/worktrees`, debounced by 200 ms. **Read access events are ignored.** On Linux, reading transcripts during a refresh triggered another refresh, an endless loop at 15–18% CPU, found while measuring idle CPU in M9. FSEvents doesn't report reads, but the filter keeps it safe everywhere.
 - Sidebar:
@@ -411,3 +411,27 @@ Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), 
 - **Relative times** ("5 min ago") refresh when the list changes, not on a timer. That's deliberate, for idle CPU.
 - **Stopping** escalates faster than the plan's 3 s (250 ms per signal). That is gpui-cn's engine; see M1.
 - **Linux quirk** (not a supported target): GPUI on Linux quits when the last window closes, so the welcome window only appears after closing the last project window on macOS.
+
+---
+
+## Change after Mac testing — new sessions start without asking for a name (2026-11-23)
+
+The owner tested on a MacBook (everything worked) and asked that ⌘N not ask for a name. The name should come from Claude Code if possible, and from the first prompt otherwise.
+
+**Can the name come from Claude Code?** Investigated with Claude Code 2.1.330:
+- Claude Code can write an AI-generated title, as a `{"type":"ai-title","aiTitle":…}` transcript entry (`saveAiGeneratedTitle`). In this version that only happens for sessions synced to claude.ai (Remote Control / bridge `auto_title`) or when an SDK host sends a `generate_session_title` control request.
+- A plain interactive session got **no** `ai-title`, even after two full turns with a realistic prompt (tested in a throwaway config).
+- A `UserPromptSubmit` or `SessionStart` hook can also return `hookSpecificOutput.sessionTitle` to set the title. That would only push a name we computed ourselves into Claude Code, and it could overwrite a name the user set with `/rename`, so it is not used.
+
+**Result**
+- ⌘N (and the `+` buttons) start `claude --session-id <uuid>` at once, with no dialog and no `--name`.
+- The row reads **"New session"** until the first prompt reaches the transcript (about a second, through the watcher). From then on it shows the first prompt, truncated to 80 characters.
+- The precedence is unchanged: app alias → custom name (`/rename`, `--name`) → generated title (`ai-title`/`summary`; used automatically if Claude Code ever writes one for local sessions) → first prompt → "New session".
+- **New Session in Worktree…** (⌘⇧N) now asks only for the worktree's name.
+- Verified with fake-claude under Xvfb: ⌘N started the session without a dialog, and after the first prompt the row showed that prompt.
+
+**Manual checks**
+- [ ] ⌘N: Claude starts at once, and the row reads "New session".
+- [ ] Send a first prompt: within about a second the row shows the prompt (truncated).
+- [ ] `/rename Something` in Claude: the row switches to "Something".
+- [ ] ⌘⇧N in a git project: the dialog asks only for the worktree name.

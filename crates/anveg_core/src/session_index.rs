@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::atomic;
 use crate::transcripts::{self, CachedTranscript, TranscriptMeta};
 
-/// Shown when nothing better is known.
-pub const UNTITLED: &str = "Untitled session";
+/// Shown until a session has a name or a first prompt.
+pub const UNTITLED: &str = "New session";
 
 /// `sessions/<project-id>.json`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
