@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/anveg_core", "crates/anveg_term", "crates/anveg_app", "crates/anveg_hook"]
+members = ["crates/anveg_core", "crates/anveg_term", "crates/anveg_lsp", "crates/anveg_app", "crates/anveg_hook"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 anveg_core = { path = "crates/anveg_core" }
 anveg_term = { path = "crates/anveg_term" }
+anveg_lsp = { path = "crates/anveg_lsp" }
 
 # UI. gpui-kit re-exports GPUI (the `gpui-pre` snapshot it pins exactly),
 # gpui-base and Longbridge's gpui-component. gpui-cn's terminal (libghostty-vt)

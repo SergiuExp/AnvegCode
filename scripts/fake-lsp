@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""A tiny fake language server for Anveg Code's tests.
+
+Speaks just enough LSP: initialize (incremental sync), didOpen/didChange
+(publishes one diagnostic per line containing "bad"), completion (two
+items), hover (the word under the cursor), definition (line 0 of the same
+file), formatting (strips trailing spaces), shutdown and exit. It asks the
+client for `workspace/configuration` once, to exercise server requests.
+"""
+import json
+import sys
+
+docs = {}
+
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+
+
+def read():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            if length is not None:
+                break
+            continue
+        k, _, v = line.decode().partition(":")
+        if k.lower() == "content-length":
+            length = int(v)
+    return json.loads(sys.stdin.buffer.read(length))
+
+
+def offset(text, pos):
+    lines = text.split("\n")
+    o = sum(len(l) + 1 for l in lines[: pos["line"]])
+    return o + pos["character"]
+
+
+def apply(text, change):
+    if "range" not in change or change["range"] is None:
+        return change["text"]
+    a = offset(text, change["range"]["start"])
+    b = offset(text, change["range"]["end"])
+    return text[:a] + change["text"] + text[b:]
+
+
+def diagnose(uri):
+    text = docs[uri]
+    diags = []
+    for i, line in enumerate(text.split("\n")):
+        c = line.find("bad")
+        if c >= 0:
+            diags.append({
+                "range": {"start": {"line": i, "character": c}, "end": {"line": i, "character": c + 3}},
+                "severity": 1,
+                "message": "bad word",
+                "source": "fake",
+            })
+    send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+          "params": {"uri": uri, "diagnostics": diags}})
+
+
+asked = False
+while True:
+    msg = read()
+    if msg is None:
+        break
+    method = msg.get("method")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {
+            "textDocumentSync": 2, "completionProvider": {}, "hoverProvider": True,
+            "definitionProvider": True, "documentFormattingProvider": True}}})
+    elif method == "initialized":
+        if not asked:
+            asked = True
+            send({"jsonrpc": "2.0", "id": 900, "method": "workspace/configuration",
+                  "params": {"items": [{"section": "x"}]}})
+    elif method == "textDocument/didOpen":
+        d = params["textDocument"]
+        docs[d["uri"]] = d["text"]
+        diagnose(d["uri"])
+    elif method == "textDocument/didChange":
+        uri = params["textDocument"]["uri"]
+        for ch in params["contentChanges"]:
+            docs[uri] = apply(docs.get(uri, ""), ch)
+        diagnose(uri)
+    elif method == "textDocument/didClose":
+        docs.pop(params["textDocument"]["uri"], None)
+    elif method == "textDocument/completion":
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"label": "alpha"}, {"label": "beta"}]})
+    elif method == "textDocument/hover":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"contents": {"kind": "markdown", "value": "**hover**"}}})
+    elif method == "textDocument/definition":
+        uri = params["textDocument"]["uri"]
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": uri, "range": {
+            "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]})
+    elif method == "textDocument/formatting":
+        uri = params["textDocument"]["uri"]
+        text = docs.get(uri, "")
+        new = "\n".join(l.rstrip() for l in text.split("\n"))
+        lines = text.split("\n")
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": len(lines) - 1, "character": len(lines[-1])}}, "newText": new}]})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": mid, "result": None})
+    elif method == "exit":
+        break
+    elif mid is not None and method is None:
+        pass  # a response to our request
+    elif mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "unknown " + str(method)}})

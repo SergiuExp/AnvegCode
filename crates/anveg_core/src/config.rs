@@ -1,6 +1,7 @@
 //! The app's own files: `settings.json`, `projects.json` and `state.json`
 //! (build plan, sections 6.1, 6.8 and 11). Every write is atomic.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::atomic;
+use crate::git::{DiffKind, PullMode};
 use crate::time::now_millis;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,48 @@ pub struct Settings {
     pub idle_stop_minutes: u32,
     /// Phase 2: show each running session's memory in its tooltip.
     pub show_memory: bool,
+    /// Phase 4: the editor.
+    pub editor: EditorPrefs,
+    /// Phase 4: language server commands, by language name
+    /// (`rust`, `typescript`, …). An empty command turns LSP off for it.
+    pub lsp_servers: BTreeMap<String, String>,
+    /// Phase 5: how Pull integrates (fast-forward only by default).
+    pub pull_mode: PullMode,
+}
+
+/// Editor preferences (Settings ▸ Editor).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorPrefs {
+    pub soft_wrap: bool,
+    pub format_on_save: bool,
+    /// Extra file types: extension (without the dot) or file name → the
+    /// language to highlight it as. Added to the built-in list.
+    pub file_types: BTreeMap<String, String>,
+}
+
+impl Default for EditorPrefs {
+    fn default() -> Self {
+        Self {
+            soft_wrap: false,
+            format_on_save: false,
+            file_types: BTreeMap::new(),
+        }
+    }
+}
+
+/// The default language servers (next phases, 4.3).
+pub fn default_lsp_servers() -> BTreeMap<String, String> {
+    [
+        ("rust", "rust-analyzer"),
+        ("typescript", "typescript-language-server --stdio"),
+        ("javascript", "typescript-language-server --stdio"),
+        ("python", "pyright-langserver --stdio"),
+        ("go", "gopls"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
 }
 
 impl Default for Settings {
@@ -72,13 +116,28 @@ impl Default for Settings {
             notifications: true,
             idle_stop_minutes: 30,
             show_memory: false,
+            editor: EditorPrefs::default(),
+            lsp_servers: default_lsp_servers(),
+            pull_mode: PullMode::default(),
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        atomic::read_json_or_default(path)
+        let mut s: Self = atomic::read_json_or_default(path);
+        // Settings files from before Phase 4 get the default servers.
+        for (k, v) in default_lsp_servers() {
+            s.lsp_servers.entry(k).or_insert(v);
+        }
+        s
+    }
+
+    /// The server command line for `language`, if one is set.
+    pub fn lsp_command(&self, language: &str) -> Option<Vec<String>> {
+        let line = self.lsp_servers.get(language)?;
+        let args = shell_words::split(line).ok()?;
+        (!args.is_empty()).then_some(args)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -212,6 +271,67 @@ pub enum RightTab {
     #[default]
     Claude,
     Terminal,
+    /// One of the document tabs (`WindowState::docs[active_doc]`).
+    Doc,
+}
+
+/// Which tab the sidebar shows (next phases, 0.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarTab {
+    #[default]
+    Sessions,
+    Files,
+    Git,
+    GitHub,
+}
+
+/// A document tab on the right side: what to load when it is first shown.
+/// Restored lazily on launch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DocKey {
+    File {
+        path: PathBuf,
+    },
+    GitDiff {
+        repo: PathBuf,
+        path: String,
+        diff: DiffKind,
+    },
+    Commit {
+        repo: PathBuf,
+        sha: String,
+        title: String,
+    },
+    PullRequest {
+        repo: PathBuf,
+        number: u64,
+        title: String,
+    },
+    Run {
+        repo: PathBuf,
+        id: u64,
+        title: String,
+    },
+    /// The failed-jobs log of a CI run (read-only text).
+    RunLog {
+        repo: PathBuf,
+        id: u64,
+        title: String,
+    },
+    /// The unsaved buffer of `path` against the file on disk. Not saved
+    /// in `state.json` (the buffer is gone after a restart).
+    Compare {
+        path: PathBuf,
+    },
+}
+
+impl DocKey {
+    /// Whether this tab comes back after a restart.
+    pub fn restorable(&self) -> bool {
+        !matches!(self, Self::Compare { .. })
+    }
 }
 
 /// A window's frame in screen points.
@@ -231,6 +351,8 @@ pub struct SavedBounds {
 pub enum PaneContent {
     Session { session_id: String },
     Terminal { index: usize },
+    /// Phase 4: a document tab.
+    Doc { doc: DocKey },
 }
 
 /// One open project window.
@@ -257,6 +379,18 @@ pub struct WindowState {
     /// Phase 3: the split ratio of the first pane (0.2–0.8).
     #[serde(default = "half")]
     pub split_ratio: f32,
+    /// Phase 4: the sidebar tab.
+    #[serde(default)]
+    pub sidebar_tab: SidebarTab,
+    /// Phase 4: open document tabs, in order.
+    #[serde(default)]
+    pub docs: Vec<DocKey>,
+    /// Phase 4: the shown document tab, when `active_tab` is `Doc`.
+    #[serde(default)]
+    pub active_doc: Option<usize>,
+    /// Phase 4: folders expanded in the Files tab.
+    #[serde(default)]
+    pub expanded_folders: Vec<PathBuf>,
 }
 
 fn default_sidebar_width() -> f32 {
@@ -283,6 +417,10 @@ impl WindowState {
             terminal_tabs: 1,
             split: None,
             split_ratio: 0.5,
+            sidebar_tab: SidebarTab::Sessions,
+            docs: Vec::new(),
+            active_doc: None,
+            expanded_folders: Vec::new(),
         }
     }
 }
@@ -319,6 +457,16 @@ mod tests {
         assert!(!s.terminal.cursor_blink);
         assert!(s.terminal.option_as_meta);
         assert_eq!(s.idle_stop_minutes, 30);
+        assert!(!s.editor.format_on_save);
+        assert_eq!(s.pull_mode, PullMode::FastForwardOnly);
+        assert_eq!(
+            s.lsp_command("typescript"),
+            Some(vec![
+                "typescript-language-server".to_owned(),
+                "--stdio".to_owned()
+            ])
+        );
+        assert_eq!(s.lsp_command("cobol"), None);
     }
 
     #[test]
@@ -405,6 +553,24 @@ mod tests {
         w.active_tab = RightTab::Terminal;
         w.running_sessions = vec!["abc".into()];
         w.split = Some(PaneContent::Terminal { index: 0 });
+        w.sidebar_tab = SidebarTab::Git;
+        w.docs = vec![
+            DocKey::File {
+                path: "/tmp/a.rs".into(),
+            },
+            DocKey::GitDiff {
+                repo: "/tmp".into(),
+                path: "a.rs".into(),
+                diff: DiffKind::Staged,
+            },
+            DocKey::PullRequest {
+                repo: "/tmp".into(),
+                number: 3,
+                title: "T".into(),
+            },
+        ];
+        w.active_tab = RightTab::Doc;
+        w.active_doc = Some(1);
         let state = AppState { windows: vec![w] };
         state.save(&path)?;
         assert_eq!(AppState::load(&path), state);
