@@ -1070,8 +1070,35 @@ impl ProjectWindow {
         self.tab == Tab::Terminal(index) || self.split == Some(PaneContent::Terminal { index })
     }
 
+    /// Never show the same thing in both panes: one terminal or session
+    /// can only be drawn once. Swap the second pane to the other kind.
+    fn dedupe_split(&mut self) {
+        let same = match (&self.split, self.tab) {
+            (Some(PaneContent::Terminal { index }), Tab::Terminal(t)) => *index == t,
+            (Some(PaneContent::Session { session_id }), Tab::Claude) => {
+                self.selected.as_deref() == Some(session_id.as_str())
+            }
+            _ => false,
+        };
+        if !same {
+            return;
+        }
+        self.split = match self.tab {
+            Tab::Terminal(_) => self
+                .selected
+                .clone()
+                .map(|session_id| PaneContent::Session { session_id }),
+            Tab::Claude => self
+                .terminals
+                .iter()
+                .position(|t| t.view.is_some())
+                .map(|index| PaneContent::Terminal { index }),
+        };
+    }
+
     /// Apply visibility to every terminal and focus the main pane.
     pub fn show_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dedupe_split();
         let ids: Vec<String> = self.running.keys().cloned().collect();
         for id in &ids {
             let visible = self.is_session_visible(id);

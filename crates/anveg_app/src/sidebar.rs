@@ -7,8 +7,8 @@ use gpui_cn::prelude::*;
 use gpui_cn::{ContextMenu, Input, MenuEntry, MenuItem as CnMenuItem};
 use gpui_kit::{
     AnyElement, AppContext as _, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, uniform_list,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px, uniform_list,
 };
 
 use crate::actions::SESSION_LIST_CONTEXT;
@@ -278,7 +278,6 @@ impl ProjectWindow {
                                 })
                             })
                             .on_drag(drag, |d, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 let m = event.modifiers();
                                 window.focus(&this.list_focus, cx);

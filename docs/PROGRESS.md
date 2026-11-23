@@ -353,6 +353,7 @@ Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), 
   - Each idle, hidden session gets one timer, for its exact deadline, with no periodic checks.
   - Working and Needs input sessions are never stopped.
   - Clicking a stopped session resumes it.
+- **Verified with fake-claude:** with the limit at 1 minute, both hidden idle sessions were stopped after 60 s (`stopping idle session` in the log), and the visible one was not.
 - **Memory display** (off by default): while the window is active, every 10 s on a background thread, the RSS of each running session's process tree is sampled and shown in the row tooltip.
 - **Phase 2 acceptance:**
   - Status changes are pushed through the socket the moment a hook runs.
@@ -391,6 +392,8 @@ Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), 
 **Verified with fake-claude:**
 - the split showed Claude and a shell side by side;
 - the fork launched with the expected arguments and appeared at the top;
+- dragging a sidebar row onto the right pane resumed that session there;
+- a pane never shows the same terminal or session as the other: showing the Terminal tab while the split shows that terminal moves the split to the selected session (fixed after testing);
 - the worktree session created `.claude/worktrees/feature-x`, was grouped under "Worktree: feature-x", and its transcript landed in the worktree's encoded directory.
 
 **Manual checks**
