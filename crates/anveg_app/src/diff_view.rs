@@ -259,6 +259,7 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) {
         let git = model(cx).read(cx).git();
+        tracing::debug!(?action, path, "applying a hunk");
         self.busy = true;
         cx.notify();
         let task = cx.background_spawn(async move {

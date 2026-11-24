@@ -10,7 +10,9 @@ Newest entries at the bottom. Each milestone lists what was done, the decisions 
 |---|---|---|
 | Rust toolchain | **1.98.1** (pinned in `rust-toolchain.toml`; GPUI's macOS backend needs ≥ 1.98) | rustup |
 | GPUI | `gpui-pre` **=0.3.10** (snapshot of Zed's `crates/gpui`, Apache-2.0) | crates.io, pinned by gpui-kit 0.8.1 |
-| gpui-kit (Longbridge) | **=0.8.1**, `default-features = false`, `features = ["assets"]` | crates.io |
+| gpui-kit (Longbridge) | **=0.8.1**, `default-features = false`, `features = ["assets", "component", "tree-sitter-*"]` (Phase 4: gpui-component's editor, diff view, Markdown and 16 grammars) | crates.io |
+| gpui-component | 0.8.1 (via gpui-kit, from Phase 4) | crates.io |
+| lsp-types | **=0.97.0** (the version gpui-base's editor uses) | crates.io |
 | gpui-base | 0.8.1 (via gpui-kit) | crates.io |
 | gpui-cn | **=0.9.0**, `default-features = false`, `features = ["ghostty"]` | crates.io |
 | libghostty-vt | 1.0.1, Ghostty commit `108cacb17ed8990840cd14abfce43d8ed8503ca1` (`ghostty-vt` / `ghostty-vt-sys` 0.9.0+ghostty-vt.1.0.1) | prebuilt XCFramework on macOS, SHA-256-checked |
@@ -18,7 +20,7 @@ Newest entries at the bottom. Each milestone lists what was done, the decisions 
 
 There are no git dependencies: everything comes from crates.io with exact `=` pins, and `Cargo.lock` is committed.
 
-Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), `trash` 5, `sysinfo` 0.37 (memory display), and `objc2` 0.6 / `objc2-app-kit` / `objc2-user-notifications` 0.3 (Dock badge, notifications; macOS only).
+Other notable crates: `ignore` 0.4 (ignore rules in the Files tab and quick open), `nucleo-matcher` 0.3 (fuzzy matching), `similar` 2.7 (Compare), `notify` 8 + `notify-debouncer-full` 0.7 (file watching), `trash` 5, `sysinfo` 0.37 (memory display), and `objc2` 0.6 / `objc2-app-kit` / `objc2-user-notifications` 0.3 (Dock badge, notifications; macOS only).
 
 ---
 
@@ -38,6 +40,7 @@ Other notable crates: `notify` 8 + `notify-debouncer-full` 0.7 (file watching), 
    - gpui-cn is a complete styled library on top of gpui-base: sidebar, dialogs, menus and context menus, tabs, inputs, a command palette, and folder and file pickers. It is also where the terminal lives.
    - So the app uses gpui-base (behavior) + gpui-cn (styling), and gpui-component is turned off. This also removes an MPL/0BSD dependency (`enum-iterator`) and makes the binary smaller.
    - Cost: the plan's later code editor (Phases 4–7) was going to come from gpui-component. Revisit then; gpui-kit can re-enable `component` if the theme clash can be managed.
+   - **Revisited in M19 (Phase 4):** gpui-component is now on, for its editor, diff view and Markdown renderer only. gpui-cn still styles the app; gpui-component's theme is kept in step with gpui-cn's (`component_theme.rs`), and gpui-cn keeps ownership of the gpui-base theme. The owner approved the one new license this needs (0BSD, `enum-iterator`).
 2. **Linux removed from the plan** (owner's request). It now sits in section 12 (Deferred) of `docs/build-plan.md`, next to Windows. The code still compiles on Linux, because the cloud containers that run `cargo build/clippy/test` are Linux. That is a development convenience, not a supported target.
 
 ---
@@ -435,3 +438,207 @@ The owner tested on a MacBook (everything worked) and asked that ⌘N not ask fo
 - [ ] Send a first prompt: within about a second the row shows the prompt (truncated).
 - [ ] `/rename Something` in Claude: the row switches to "Something".
 - [ ] ⌘⇧N in a git project: the dialog asks only for the worktree name.
+
+---
+
+# Phases 4–6 (`docs/next-phases.md`)
+
+The owner asked for Phases 4–6 only. **Phase 7 (per-session change review) is postponed**; its full specification is in `docs/TODO.md`.
+
+All of it was built and exercised on Linux under Xvfb (with `scripts/fake-claude`, `scripts/fake-gh` and `scripts/fake-lsp`), and type-checked for macOS with `scripts/check-macos.sh`. None of it has run on a Mac yet.
+
+## Decisions for Phases 4–6 (2026-11-23)
+
+1. **gpui-component is enabled** for the code editor (`EditorState` + `Editor`), the diff view (`Diff`) and Markdown (`TextView`). See decision 1 at the top. License: 0BSD added for `enum-iterator`, **approved by the owner**.
+2. **Right-side tabs are our own tab strip, not gpui-component's dock.** The Phase 3 panes (Claude, terminals, split view, drag a session into the split) already work and were tested on a Mac; replacing them with the dock would have meant two pane systems or a rewrite. Document tabs (files, diffs, commits, pull requests, CI runs, logs, the new-PR form) join the same strip, can be dragged into the split pane, and scroll sideways when there are many.
+3. **The GitHub tab is always shown.** When `gh` is missing or signed out it shows only the setup steps (`brew install gh`, `gh auth login`), as 6.1 describes, with a button that runs `gh auth login` in a terminal tab and a "Check Again" button.
+4. **Hunk buttons** (Stage / Unstage / Discard Hunk) sit just below each hunk, as gpui-component diff annotations. File buttons (Stage File, Unstage File, Discard…, Delete…) are in each file's header.
+5. **Prompts** from panels and tabs share one dialog (`workspace::Prompt`), so every confirmation, name field and error message looks the same.
+6. **"Ask Claude" mention syntax:** Claude Code 2.1.331 inserts `@path#L10 ` or `@path#L10-20 ` for an IDE selection (found in its bundle), so the app types exactly that.
+7. **Typing into Claude** uses a paste (bracketed when Claude asks for it), so it can never submit. It goes to the session selected in the sidebar if it is running; otherwise a toast asks you to select one.
+
+---
+
+## M19 — Layout: sidebar tabs, document tabs, lazy restore (2026-11-23)
+
+**Done**
+- Sidebar tab strip **Sessions | Files | Git | GitHub** (⌘⇧1–4, View menu). Panels are created the first time they are shown.
+- Document tabs on the right, after the Claude and Terminal tabs. A dirty file shows `●`. ⌘⇧W or × closes a tab (asks when a file has unsaved changes). Drag a document tab onto the split pane to show it there.
+- `state.json` keeps the sidebar tab, the open document tabs, the shown one, the split pane's document, and the expanded folders. **Restore is lazy:** tabs come back as placeholders and load when first shown; GitHub tabs restored at launch wait until `gh` detection has finished.
+- Closing a window or quitting with unsaved files asks: Save All / Don't Save / Cancel.
+
+**Manual checks**
+- [ ] Switch between the four sidebar tabs; ⌘⇧1–4 do the same.
+- [ ] Open three files, a diff and a PR; quit and relaunch: the same tabs, the same one shown, and only that one loads (no `gh` call for hidden PR tabs).
+- [ ] Drag a file tab onto the split pane.
+- [ ] Edit a file, then ⌘W: the "Save changes?" dialog; Cancel keeps the window open.
+
+## M20 — File tree and `FsWatchService` (2026-11-23)
+
+**Done**
+- `anveg_core::fswatch::FsWatchService`: one shared watcher, reference-counted subscriptions by path, debounced batches (150 ms). A file subscription watches its folder and reports only that file. Tested, including a 200-file burst arriving as a handful of batches.
+- `anveg_core::files`: lazy one-level listing with `.gitignore`, `.ignore` and global excludes (`ignore` crate), `.git` hidden, ignored entries marked when "show ignored" is on.
+- Files tab: roots (main and extra folders), folders listed only when expanded, **only expanded folders watched, and only while the tab is visible**. Git status colours and letters on files, a colour on folders with changes.
+- Context menu: Open, Mention in Claude, New File…, New Folder…, Rename…, Reveal in Finder, Copy Path, Copy Relative Path, Move to Trash… (with confirmation).
+- Quick open (⌘P, File ▸ Go to File…): fuzzy (`nucleo-matcher`), respects ignore files. The index is built on first use and reused until a file under the roots changes.
+
+**Manual checks**
+- [ ] Expand folders in a large repository: instant, and `target/`/`node_modules/` are hidden until the eye button is on.
+- [ ] Ask Claude to create, rename and delete files: the tree follows within about a second.
+- [ ] Right-click ▸ Mention in Claude with a running session: `@path ` appears in Claude's prompt, nothing is sent.
+- [ ] ⌘P, type a few letters of a file name, ↓/↑, Enter: it opens. Esc closes.
+
+## M21 — Editor without LSP (2026-11-23)
+
+**Done**
+- gpui-component's code editor: tree-sitter highlighting (Rust, TypeScript/TSX, JavaScript, Python, Go, JSON, TOML, YAML, Markdown, HTML, CSS, Bash, Swift, C, C++, diff), line numbers, find and replace (⌘F), go to line (⌘L, `line` or `line:col`), soft wrap (Wrap button, ⌥Z, and a Settings default), extra cursors with ⌥-click.
+- Settings ▸ Editor ▸ Extra file types maps more extensions to these languages.
+- Line endings (LF/CRLF), the trailing newline (or its absence) and the indentation style (tabs or 2/4/8 spaces) are detected and kept. ⌘S saves atomically; File ▸ Save All (⌘⌥S).
+- Binary and non-UTF-8 files open read-only with a notice. Over 200,000 lines or 20 MB: read-only plain text with a warning.
+- Markdown files have a Preview toggle (gpui-component's Markdown renderer).
+
+**Manual checks**
+- [ ] Open a 10,000-line file: it appears at once (target under 200 ms).
+- [ ] Open a CRLF file, edit, save: still CRLF (`file` or `git diff` shows no line-ending change). Same for a file without a final newline.
+- [ ] Open an image or a Latin-1 file: read-only notice.
+- [ ] README.md ▸ Preview.
+
+## M22 — External changes, terminal links, Mention / Ask Claude (2026-11-23)
+
+**Done**
+- Each open file is watched. A clean buffer reloads silently, keeping cursor and scroll. A dirty buffer shows **"This file changed on disk"** with Reload, Keep Mine and Compare (Compare opens a diff of disk ↔ your buffer). A deleted file says so. The app's own saves don't trigger the banner.
+- ⌘-click on `path`, `path:line` or `path:line:col` in any terminal (Claude or a shell) opens the file there. Paths resolve against the terminal's working directory (OSC 7), then the project's folders; URLs still open in the browser.
+- **Ask Claude** (button, ⌘⇧L, Edit menu) types `@path#L10-20 ` for the selected lines (or the cursor's line).
+
+**Manual checks**
+- [ ] With a file open and unchanged, have Claude edit it: the editor updates within a second, cursor kept.
+- [ ] Type in the file, then have Claude edit it: the banner; try Reload, Keep Mine and Compare.
+- [ ] In Claude's output, ⌘-click a `src/x.rs:12:5` reference: the file opens at that line.
+- [ ] Select lines 3–5, ⌘⇧L: `@src/x.rs#L3-5 ` appears in Claude's prompt, not sent.
+
+## M23 — LSP (2026-11-23)
+
+**Done**
+- New crate **`anveg_lsp`**: JSON-RPC over stdio with `lsp-types`; requests return futures (any executor); server-to-client requests get default answers (`workspace/configuration` → nulls); notifications go to a callback. URI and UTF-16 position helpers, incremental change computation. Tested against `scripts/fake-lsp` (python3).
+- `lsp_manager.rs`: one server per (project, server command); the project's folders are the workspace folders. A server **starts when the first file in its language opens** and gets `shutdown`/`exit` **10 minutes after the last one closes**. After a crash it restarts with backoff (1, 2, 4 s), at most 3 times.
+- Sync: `didOpen`, incremental `didChange`, `didSave`, `didClose`; Claude's edits to files that are not open go out as `workspace/didChangeWatchedFiles` (build and VCS folders filtered).
+- Diagnostics (underlines, gutter, a "N problems" list in the status bar that jumps to the line), completion, hover, go to definition (opens other files), Format Document (⌥⇧F), format on save (Settings, default off).
+- Settings ▸ Language servers: commands for Rust, TypeScript/TSX, JavaScript, Python and Go (defaults from the plan). A missing server shows an install hint in the editor's status bar.
+
+**Manual checks**
+- [ ] With rust-analyzer installed, open a `.rs` file: diagnostics, completion, hover and ⌘-click go to definition work.
+- [ ] `ps` shows no language server before opening a file; close all `.rs` files and wait 10 minutes: rust-analyzer exits.
+- [ ] Kill rust-analyzer (`kill`): it restarts; kill it 4 times: the status bar says it crashed too often.
+- [ ] Turn on format on save; save a badly formatted file: it is formatted.
+
+## M24 — `ProcessRunner`, repositories, status (2026-11-23)
+
+**Done**
+- `anveg_core::process`: runs a command with the captured environment and a working directory, with a timeout, cancellation, stdout/stderr capture, stdin, stderr progress lines and JSON decoding. **Commands that change a repository take that repository's lock**, so they never overlap (tested).
+- `anveg_core::git`: everything through the `git` CLI. Reads run with `GIT_OPTIONAL_LOCKS=0` (so `git status` never rewrites the index and wakes the watcher); every command with `GIT_TERMINAL_PROMPT=0`.
+- Repositories found per project folder (`rev-parse --show-toplevel`); several repositories get a switcher at the top of the Git tab; linked worktrees are listed with their branches.
+- `git status --porcelain=v2 -z --branch`: Conflicts, Staged, Changes, Untracked, the branch, and ↑ahead ↓behind / "not published".
+- Refreshes: index, HEAD and refs changes; working-tree changes (300 ms after the last one); window focus. **Only while the Files, Git or GitHub tab is visible. No polling.**
+
+**Manual checks**
+- [ ] In a 10,000-file repository, edit a file: the Git tab updates within about 300 ms (`git status refreshed ms=…` in the log at debug level).
+- [ ] Switch to the Sessions tab and leave the app idle: no `git` processes (`ps`, or `sudo fs_usage`).
+
+## M25 — `DiffView` and file diffs (2026-11-23)
+
+**Done**
+- `diff_view.rs` on gpui-component's virtualized diff: unified, syntax-highlighted, hunk headers, per-hunk buttons. Above 5,000 lines: "Large diff — Show anyway".
+- Clicking a file in the Git tab opens `git diff [--cached]`; untracked files show as all-new; binary files show "Binary file changed". Clicking a line on the new side opens the file there.
+
+## M26 — Staging, hunks, discard, commit (2026-11-23)
+
+**Done**
+- Stage/unstage files (`git add`, `git restore --staged`, with `git rm --cached` before the first commit), Stage All / Unstage All per section.
+- Hunk staging builds a one-hunk patch and runs `git apply --cached` (`-R` to unstage). **Tested on CRLF files and on files without a final newline.**
+- Discard (file or hunk) always asks, and **copies the current file to the Trash first**; untracked files are moved to the Trash.
+- Commit box: summary (hint past 72 characters), description, Amend (pre-fills the last message), Commit (⌘↩), and **Stage All and Commit** when nothing is staged. Hook output (pre-commit…) is shown when a commit fails. Signing follows the user's git config.
+
+**Manual checks**
+- [ ] Stage one hunk of a CRLF file; `git diff --cached` shows just that hunk.
+- [ ] Discard a hunk: the dialog, then the change is gone and a copy of the file is in the Trash.
+- [ ] Commit with a failing pre-commit hook: the hook's output appears.
+
+## M27 — Branches and remotes (2026-11-23)
+
+**Done**
+- Branches view: local and remote branches with their last commit. Click to check out (git's own message if changes block it; a remote branch checks out a tracking branch). New Branch… (from the current branch or any listed one), Rename…, Delete… — a branch with unmerged commits needs a second, explicit "Delete Anyway".
+- Fetch, Pull (fast-forward only by default; Settings ▸ Git ▸ Pull: Merge or Rebase), Push (the first push publishes the branch with `--set-upstream`). Progress line from git's stderr and a Cancel button. Authentication failures explain how to set up a credential helper or use the Terminal tab.
+
+**Manual checks**
+- [ ] Push a new branch: it is published (`not published` disappears).
+- [ ] Pull with diverged branches in fast-forward-only mode: git's refusal is shown.
+- [ ] Fetch from a remote that needs a password without a credential helper: the explanation, and no hang.
+
+## M28 — History and stash (2026-11-23)
+
+**Done**
+- History view: the current branch's last 200 commits; a click opens the commit's diff as a tab.
+- Stash view: Stash Changes… (with a message, includes untracked files), Apply, Pop, Drop (asks).
+
+---
+
+## M29 — `gh` detection and PR list (2026-11-23)
+
+**Done**
+- `anveg_core::gh`: every call uses `--json` with explicit fields and `serde` with optional fields; rate limiting is recognised. `scripts/fake-gh` answers with fixtures for manual tests and logs every call (`FAKE_GH_LOG`).
+- `gh --version` and `gh auth status` run after the login environment is captured, and again on window focus (at most every 30 s) until `gh` is ready. Enterprise hosts work through `gh`'s own config.
+- GitHub tab: the repository (`gh repo view`), pull requests with filters **Mine / Review Requested / All Open** (number, title, author, branch, draft, review state, a checks icon), and the current branch's CI runs.
+
+## M30 — PR detail and actions (2026-11-23)
+
+**Done**
+- A PR opens as a tab: title, author, branches, state, size; **Overview** (Markdown description, checks with status, reviews and the review decision, read-only comments) and **Files Changed** (`gh pr diff` in a `DiffView`).
+- Open in Browser, Copy Link, Check Out (warns first when the working tree has changes), Mark Ready for Review (drafts), Merge… (squash, merge or rebase; GitHub's message when branch protection refuses), Close… (asks).
+
+## M31 — Create PR and CI runs (2026-11-23)
+
+**Done**
+- New Pull Request (GitHub tab): a form tab with base (the repository's default branch), title and body pre-filled from the branch's commits, and Draft. It pushes the branch first when needed (publishing it if it has no upstream), runs `gh pr create`, then opens the new PR.
+- CI runs: the latest run's status also shows in the Git tab header. A run opens as a tab with its jobs; **Show Failed Logs** (`gh run view --log-failed`, a read-only, searchable text tab), **Re-run Failed Jobs**, **Open in Browser**.
+
+## M32 — Claude integrations and refresh rules (2026-11-23)
+
+**Done**
+- **Ask Claude to Fix** (failed checks in a PR, failed runs): saves the last 300 lines of the failed log to a temporary file and types a prompt naming the PR or run and the check, with `@<log file>`, into the active Claude session. **Never presses Enter.**
+- **Open Linked Claude Sessions** (PR tab): runs `claude --from-pr <number>` in a new terminal tab.
+- Refresh: when the GitHub tab is shown, on window focus, on ⟳, and **every 60 s only while the tab is visible and its window has focus**. Rate limits double the interval (up to 16×). Hidden: nothing runs (checked with the fake `gh` call log: no calls until the tab was shown; hidden PR tabs restored at launch made no calls).
+
+**Manual checks (Phase 6)**
+- [ ] Without `gh`: the GitHub tab shows the install and sign-in steps; after `brew install gh` + `gh auth login`, Check Again shows your PRs.
+- [ ] PR list loads in under 2 s for a typical repository; switch filters.
+- [ ] Open a PR: description, checks, reviews, comments; Files Changed shows the diff.
+- [ ] Check Out with local changes: the warning first.
+- [ ] Merge on a protected branch: GitHub's refusal is shown.
+- [ ] New Pull Request from an unpublished branch: it is pushed, the PR is created and opens.
+- [ ] A failed run: Show Failed Logs; Re-run Failed Jobs; Ask Claude to Fix types the prompt (not sent).
+- [ ] Leave the Sessions tab shown for a few minutes: no `gh` processes.
+
+---
+
+## Phase 4–6 verification on Linux (2026-11-23)
+
+Exercised under Xvfb in a demo repository (fake Claude, fake gh, fake language server):
+- Files tab: ignore rules (`target/` hidden), git colours, context menu, Mention in Claude typed `@README.md ` into the session.
+- Editor: highlighting, typing, dirty marker, completion popup, hover, a diagnostic and "1 problem", external change while dirty → banner → Compare and Reload, ⌘S keeping the trailing newline.
+- Git tab: sections, a hunk staged from the diff, commit with ⌘↩ from the summary field, History → commit diff, New Branch… through the prompt.
+- GitHub tab: PR list and runs, PR overview and Files Changed, failed log tab; restart → lazy restore.
+- ⌘-click on `src/main.rs:6:4` in a shell opened the file at line 6, column 4.
+- ⌘P quick open.
+- Discard Hunk: the dialog, then the hunk was gone and a copy of the file was in the Trash.
+- Release build, Git tab and a diff open, 30 s idle: **0.57 % CPU, no `git` or `gh` process**, one status refresh in total. RSS was 185 MB, mostly Mesa's software renderer (llvmpipe) under Xvfb; measure on a Mac before drawing conclusions.
+
+**Bugs found and fixed while testing**
+- The terminal's bounds were measured from a canvas laid out below the grid, so ⌘-click missed every path.
+- Open git diff tabs did not update when files changed outside the app; they now reload whenever the Git status refreshes.
+- GitHub tabs restored at launch were created before `gh` detection finished and never loaded; they now load when `gh` becomes ready. The GitHub tab's first refresh could also run before the branch was known (no CI runs); a refresh asked for while one runs now runs again afterwards.
+- New document tabs could open off-screen in a long tab strip; the strip now scrolls and keeps the shown tab in view.
+
+**Notes**
+- In a dialog whose only action is destructive (Discard, Delete, Drop), Enter closes it without doing anything; the action needs a click.
+- Git diff tabs follow outside changes only while the Files, Git or GitHub tab is shown (that is when git status is watched). Otherwise they update on the next git operation or when one of those tabs is shown again.
+- `scripts/check-macos.sh` now needs `zig` on Linux (for the grammars' C code); it passes.

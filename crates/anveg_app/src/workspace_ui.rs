@@ -105,7 +105,10 @@ impl ProjectWindow {
         self.git_store.update(cx, |s, cx| s.refresh(cx));
     }
 
-    pub fn on_git_store_changed(&mut self, cx: &mut Context<Self>) {
+    /// Status was re-read (something changed on disk or in git): open git
+    /// diff tabs show the new state too.
+    pub fn on_git_store_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_git_docs(window, cx);
         cx.notify();
     }
 
@@ -247,6 +250,7 @@ impl ProjectWindow {
         let Some(button) = index.and_then(|i| prompt.buttons.get(i)).cloned() else {
             return;
         };
+        tracing::debug!(button = %button.label, "prompt button");
         let value = input.as_ref().map(|i| i.read(cx).value().to_string());
         let saved = Some((prompt.clone(), input.clone()));
         let Some(action) = button.action else {

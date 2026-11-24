@@ -76,7 +76,9 @@ impl DocTab {
     pub fn title(&self, cx: &App) -> String {
         match (&self.view, &self.key) {
             (Some(DocView::Editor(e)), _) => e.read(cx).title(),
-            (Some(DocView::Diff(d)), _) => d.read(cx).title(),
+            (Some(DocView::Diff(d)), DocKey::GitDiff { .. } | DocKey::Compare { .. }) => {
+                d.read(cx).title()
+            }
             (_, key) => key_title(key),
         }
     }
@@ -377,10 +379,8 @@ impl ProjectWindow {
             WorkspaceEvent::RunInTerminal(args) => self.run_in_terminal(args, window, cx),
             WorkspaceEvent::Toast(text) => self.toast(text, cx),
             WorkspaceEvent::Prompt(prompt) => self.show_prompt(prompt, window, cx),
-            WorkspaceEvent::GitChanged => {
-                self.git_changed(cx);
-                self.reload_git_docs(window, cx);
-            }
+            // The store refreshes, and then the git diff tabs reload.
+            WorkspaceEvent::GitChanged => self.git_changed(cx),
         }
     }
 

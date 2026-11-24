@@ -197,6 +197,8 @@ pub struct ProjectWindow {
     pub git_store: Entity<GitStore>,
     pub quick_open: Option<Entity<crate::files_panel::QuickOpen>>,
     pub file_index: Option<crate::files_panel::FileIndex>,
+    /// The right side's tab strip, to scroll the shown tab into view.
+    pub tab_scroll: gpui_kit::ScrollHandle,
     pub saved_expanded: Vec<PathBuf>,
     bounds: Option<SavedBounds>,
     pub dialog: Option<DialogKind>,
@@ -340,8 +342,8 @@ impl ProjectWindow {
             },
         };
         let git_store = cx.new(|cx| GitStore::new(project_id, cx));
-        subscriptions.push(cx.observe(&git_store, |this, _, cx| {
-            this.on_git_store_changed(cx);
+        subscriptions.push(cx.observe_in(&git_store, window, |this, _, window, cx| {
+            this.on_git_store_changed(window, cx);
         }));
         let mut this = Self {
             project_id,
@@ -376,6 +378,7 @@ impl ProjectWindow {
             git_store,
             quick_open: None,
             file_index: None,
+            tab_scroll: gpui_kit::ScrollHandle::new(),
             saved_expanded: saved.expanded_folders.clone(),
             sidebar_state,
             split_state,
@@ -1182,6 +1185,13 @@ impl ProjectWindow {
     /// Apply visibility to every terminal and focus the main pane.
     pub fn show_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dedupe_split();
+        // Children of the strip: Claude, the terminals, "+", then the docs.
+        let strip_index = match self.tab {
+            Tab::Claude => 0,
+            Tab::Terminal(i) => 1 + i,
+            Tab::Doc(i) => 2 + self.terminals.len() + i,
+        };
+        self.tab_scroll.scroll_to_item(strip_index);
         let ids: Vec<String> = self.running.keys().cloned().collect();
         for id in &ids {
             let visible = self.is_session_visible(id);

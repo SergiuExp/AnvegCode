@@ -848,23 +848,31 @@ pub struct Hunk {
 }
 
 impl Hunk {
-    /// The first changed line on the new side (1-based), or the old side
-    /// for a pure deletion: where the hunk's buttons go.
+    /// The hunk's last shown line, as (new side?, 1-based line): the hunk's
+    /// buttons go just below it, so they never split a change.
     pub fn anchor(&self) -> (bool, u32) {
         let mut old = self.old_start;
         let mut new = self.new_start;
+        let mut last = (true, self.new_start);
         for l in &self.lines {
             match l.as_bytes().first() {
-                Some(b'+') => return (true, new),
-                Some(b'-') => return (false, old),
+                Some(b'+') => {
+                    last = (true, new);
+                    new += 1;
+                }
+                Some(b'-') => {
+                    last = (false, old);
+                    old += 1;
+                }
                 Some(b' ') => {
+                    last = (true, new);
                     old += 1;
                     new += 1;
                 }
                 _ => {}
             }
         }
-        (true, self.new_start)
+        last
     }
 }
 
@@ -1241,6 +1249,11 @@ u UU N... 100644 100644 100644 100644 h1 h2 h3 conflict.rs\0\
             new_len: 4,
             lines: vec![" a".into(), " b".into(), "-c".into(), "+C".into()],
         };
-        assert_eq!(h.anchor(), (false, 12));
+        assert_eq!(h.anchor(), (true, 12));
+        let deletion_at_end = Hunk {
+            lines: vec![" a".into(), "-b".into()],
+            ..h
+        };
+        assert_eq!(deletion_at_end.anchor(), (false, 11));
     }
 }

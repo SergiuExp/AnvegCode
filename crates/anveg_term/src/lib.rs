@@ -318,6 +318,7 @@ impl TerminalView {
             return;
         }
         let Some(bounds) = self.bounds.get() else {
+            tracing::debug!("terminal bounds unknown");
             return;
         };
         let state = self.state.read(cx);
@@ -326,14 +327,17 @@ impl TerminalView {
         let cell_w = frame.viewport.cell_width() as f32 / scale;
         let cell_h = frame.viewport.cell_height() as f32 / scale;
         if cell_w <= 0.0 || cell_h <= 0.0 {
+            tracing::debug!(?bounds, "no cell size yet");
             return;
         }
         let x = f32::from(event.position.x - bounds.origin.x) - PADDING;
         let y = f32::from(event.position.y - bounds.origin.y) - PADDING;
         if x < 0.0 || y < 0.0 {
+            tracing::debug!(x, y, ?bounds, "outside the grid");
             return;
         }
         let (col, row) = ((x / cell_w) as u16, (y / cell_h) as usize);
+        tracing::debug!(col, row, cell_w, cell_h, "terminal cmd-click");
         let Some(row) = frame.rows.get(row) else {
             return;
         };
@@ -355,6 +359,7 @@ impl TerminalView {
         };
         let index = prefix.chars().count();
         let Some(link) = path_link_at(&row.text, index) else {
+            tracing::debug!(text = %row.text, index, "no path under the pointer");
             return;
         };
         let cwd = state.cwd().map(PathBuf::from);
@@ -381,6 +386,8 @@ impl Render for TerminalView {
             .child(
                 canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
                     .absolute()
+                    .top_0()
+                    .left_0()
                     .size_full(),
             )
     }

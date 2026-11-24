@@ -61,6 +61,28 @@ fn checks_badge(s: ChecksSummary, c: &Colors) -> Option<(&'static str, Hsla)> {
     }
 }
 
+/// `gh` once detection has finished (after launch it takes a moment).
+fn gh_ready(cx: &App) -> Option<gh::Gh> {
+    let m = model(cx).read(cx);
+    matches!(m.gh_state, Some(GhState::Ready { .. }))
+        .then(|| m.gh())
+        .flatten()
+}
+
+/// Call `f` when `gh` becomes ready (for tabs restored at launch).
+fn on_gh_ready<T: 'static>(
+    window: &mut Window,
+    cx: &mut Context<T>,
+    f: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> gpui_kit::Subscription {
+    let m = model(cx);
+    cx.subscribe_in(&m, window, move |this, _, event, window, cx| {
+        if matches!(event, ModelEvent::GhChanged) && gh_ready(cx).is_some() {
+            f(this, window, cx);
+        }
+    })
+}
+
 fn gh_error(e: &anyhow::Error) -> String {
     if e.downcast_ref::<RateLimited>().is_some() {
         format!("GitHub is rate-limiting requests; trying again later. ({e})")
@@ -145,6 +167,7 @@ pub struct GitHubPanel {
     runs: Vec<Run>,
     branch: Option<String>,
     loading: bool,
+    again: bool,
     error: Option<String>,
     visible: bool,
     focused: bool,
@@ -193,6 +216,7 @@ impl GitHubPanel {
             runs: Vec::new(),
             branch: None,
             loading: false,
+            again: false,
             error: None,
             visible: false,
             focused: false,
@@ -250,7 +274,11 @@ impl GitHubPanel {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let ready = matches!(model(cx).read(cx).gh_state, Some(GhState::Ready { .. }));
-        if !ready || self.loading {
+        if !ready {
+            return;
+        }
+        if self.loading {
+            self.again = true;
             return;
         }
         let Some(root) = self.repo_root(cx) else {
@@ -315,6 +343,9 @@ impl GitHubPanel {
                 }
                 this.backoff = if limited { this.backoff + 1 } else { 0 };
                 this.error = error;
+                if std::mem::take(&mut this.again) {
+                    this.refresh(cx);
+                }
                 cx.notify();
             });
         }));
@@ -530,6 +561,7 @@ pub struct PrView {
     error: Option<String>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
+    _gh: gpui_kit::Subscription,
 }
 
 impl EventEmitter<WorkspaceEvent> for PrView {}
@@ -555,14 +587,21 @@ impl PrView {
             error: None,
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
+            _gh: on_gh_ready(window, cx, |this: &mut Self, _, cx| {
+                if this.detail.is_none() {
+                    this.refresh(cx)
+                }
+            }),
         };
         this.refresh(cx);
         this
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(gh) = model(cx).read(cx).gh() else {
-            self.error = Some("The GitHub CLI (gh) isn't available.".into());
+        let Some(gh) = gh_ready(cx) else {
+            if matches!(model(cx).read(cx).gh_state, Some(GhState::Missing | GhState::SignedOut { .. })) {
+                self.error = Some("The GitHub CLI (gh) isn't available or isn't signed in.".into());
+            }
             return;
         };
         if self.loading {
@@ -1036,6 +1075,7 @@ pub struct RunView {
     busy: bool,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
+    _gh: gpui_kit::Subscription,
 }
 
 impl EventEmitter<WorkspaceEvent> for RunView {}
@@ -1047,7 +1087,7 @@ impl Focusable for RunView {
 }
 
 impl RunView {
-    pub fn new(repo: PathBuf, id: u64, title: String, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(repo: PathBuf, id: u64, title: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             repo,
             id,
@@ -1057,13 +1097,18 @@ impl RunView {
             busy: false,
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
+            _gh: on_gh_ready(window, cx, |this: &mut Self, _, cx| {
+                if this.detail.is_none() {
+                    this.refresh(cx)
+                }
+            }),
         };
         this.refresh(cx);
         this
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(gh) = model(cx).read(cx).gh() else {
+        let Some(gh) = gh_ready(cx) else {
             return;
         };
         let (repo, id) = (self.repo.clone(), self.id);
@@ -1230,9 +1275,13 @@ impl Render for RunView {
 
 pub struct LogView {
     state: Entity<EditorState>,
+    repo: PathBuf,
+    id: u64,
     loading: bool,
+    started: bool,
     error: Option<String>,
     _task: Option<Task<()>>,
+    _gh: Option<gpui_kit::Subscription>,
 }
 
 impl EventEmitter<WorkspaceEvent> for LogView {}
@@ -1254,13 +1303,30 @@ impl LogView {
         state.update(cx, |s, cx| s.set_readonly(true, cx));
         let mut this = Self {
             state,
+            repo,
+            id,
             loading: true,
+            started: false,
             error: None,
             _task: None,
+            _gh: None,
         };
-        if let Some(gh) = model(cx).read(cx).gh() {
+        this._gh = Some(on_gh_ready(window, cx, |this: &mut Self, window, cx| {
+            this.load(window, cx)
+        }));
+        this.load(window, cx);
+        this
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.started {
+            return;
+        }
+        if let Some(gh) = gh_ready(cx) {
+            self.started = true;
+            let (repo, id) = (self.repo.clone(), self.id);
             let task = cx.background_spawn(async move { gh.run_failed_log(&repo, id) });
-            this._task = Some(cx.spawn_in(window, async move |this, cx| {
+            self._task = Some(cx.spawn_in(window, async move |this, cx| {
                 let r = task.await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.loading = false;
@@ -1279,7 +1345,6 @@ impl LogView {
                 });
             }));
         }
-        this
     }
 }
 

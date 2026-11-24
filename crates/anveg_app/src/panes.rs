@@ -47,7 +47,16 @@ enum PaneView {
 
 impl ProjectWindow {
     fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut strip = div().flex().items_center().gap_1().min_w_0();
+        // The tabs scroll sideways when there are many; Split stays put.
+        let mut strip = div()
+            .id("tab-strip")
+            .flex()
+            .items_center()
+            .gap_1()
+            .flex_1()
+            .min_w_0()
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
         strip = strip.child(
             Button::new("tab-claude")
                 .ghost()
@@ -139,7 +148,7 @@ impl ProjectWindow {
                     ),
             );
         }
-        strip = strip.child(div().flex_1()).child(
+        let strip = div().flex().items_center().w_full().min_w_0().child(strip).child(
             Button::new("toggle-split")
                 .ghost()
                 .size(ButtonSize::Sm)
