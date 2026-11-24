@@ -50,6 +50,19 @@ This builds `dist/Anveg Code.app` with the helper inside, and signs it ad hoc fo
 
 Notifications only work from the bundled app; under `cargo run` they are written to the log.
 
+### Install in /Applications
+
+```bash
+scripts/install-macos.sh --open
+```
+
+This builds the bundle (as above) and installs it as `/Applications/Anveg Code.app`, replacing an older copy. If that copy is running, it is asked to quit first; it may ask whether to stop running sessions. Leave out `--open` to install without launching. Other options:
+
+- `DEST=~/Applications scripts/install-macos.sh` installs for your user only.
+- `UNIVERSAL=1` and `BUNDLE_ID=…` work as for `bundle-macos.sh`.
+
+Your settings, projects and notes stay where they are, in `~/Library/Application Support/Anveg Code/`.
+
 ## Checks
 
 Every milestone must pass these:
