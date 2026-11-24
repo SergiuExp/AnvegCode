@@ -145,6 +145,11 @@ pub struct TranscriptMeta {
     pub non_interactive: Option<bool>,
     /// Whether any real user prompt was seen.
     pub has_prompt: bool,
+    /// The context size of the latest main-thread reply (input + cache
+    /// tokens): the session toolbar's estimate when the status line is off.
+    pub context_tokens: Option<u64>,
+    /// The model of that reply.
+    pub model: Option<String>,
 }
 
 impl TranscriptMeta {
@@ -192,7 +197,32 @@ impl TranscriptMeta {
                 }
             }
             "user" => self.apply_user(entry),
+            "assistant" => self.apply_assistant(entry),
             _ => {}
+        }
+    }
+
+    fn apply_assistant(&mut self, entry: &Value) {
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        let Some(message) = entry.get("message") else {
+            return;
+        };
+        if let Some(usage) = message.get("usage") {
+            let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let total =
+                n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+            if total > 0 {
+                self.context_tokens = Some(total);
+            }
+        }
+        if let Some(model) = message
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty() && !m.starts_with('<'))
+        {
+            self.model = Some(model.to_owned());
         }
     }
 
@@ -360,6 +390,24 @@ pub fn parse_complete_lines(buf: &[u8], meta: &mut TranscriptMeta) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_tokens_from_the_latest_reply() {
+        let mut meta = TranscriptMeta::default();
+        let reply = |input: u64, sidechain: bool| {
+            serde_json::json!({"type":"assistant","isSidechain":sidechain,"message":{
+                "model":"claude-opus-5-5","usage":{"input_tokens":input,
+                "cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":50}}})
+        };
+        meta.apply(&reply(10, false));
+        assert_eq!(meta.context_tokens, Some(1110));
+        // Subagent replies don't count.
+        meta.apply(&reply(99_999, true));
+        assert_eq!(meta.context_tokens, Some(1110));
+        meta.apply(&reply(20, false));
+        assert_eq!(meta.context_tokens, Some(1120));
+        assert_eq!(meta.model.as_deref(), Some("claude-opus-5-5"));
+    }
     use std::io::Write as _;
 
     fn fixture(name: &str) -> PathBuf {

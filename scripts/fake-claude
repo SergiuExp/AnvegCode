@@ -12,6 +12,9 @@
 # When `--settings` names a hooks file and $ANVEG_HOOK_SOCKET is set, it
 # runs that file's first hook command for SessionStart, UserPromptSubmit,
 # Stop and SessionEnd (needs python3 to read the JSON; skipped otherwise).
+# When that file also has a statusLine command, it runs it after each reply
+# with a status-line JSON: each prompt adds 30k tokens of context (of 200k),
+# `/compact` brings it back to 10k, `/effort X` sets the effort.
 set -u
 
 CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -77,7 +80,19 @@ echo "fake-claude: transcript $file"
 if [ -n "$name" ]; then
   printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$(json_escape "$name")" "$session_id" >> "$file"
 fi
+context=0
+effort=high
+status_line() {
+  [ -n "$settings" ] && [ -f "$settings" ] || return 0
+  command -v python3 >/dev/null || return 0
+  local cmd
+  cmd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["statusLine"]["command"])' "$settings" 2>/dev/null) || return 0
+  printf '{"session_id":"%s","model":{"id":"claude-fake-1","display_name":"Fake 1"},"effort":{"level":"%s"},"context_window":{"total_input_tokens":%d,"context_window_size":200000,"used_percentage":%d,"remaining_percentage":%d,"current_usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}' \
+    "$session_id" "$effort" "$context" $((context * 100 / 200000)) $((100 - context * 100 / 200000)) "$context" | sh -c "$cmd" >/dev/null 2>&1
+}
+
 hook SessionStart ',"source":"startup"'
+status_line
 trap 'hook SessionEnd ",\"reason\":\"other\""; exit 0' HUP TERM
 
 handle() {
@@ -89,12 +104,18 @@ handle() {
       printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$(json_escape "$title")" "$session_id" >> "$file"
       echo "Session renamed to: $title" ;;
     "") ;;
+    /compact)
+      context=10000; echo "Compacted."; status_line ;;
+    /effort\ *)
+      effort=${line#/effort }; echo "Effort set to $effort"; status_line ;;
     *)
       hook UserPromptSubmit
       printf '{"type":"user","message":{"role":"user","content":"%s"},"timestamp":"%s","cwd":"%s","sessionId":"%s","entrypoint":"cli","isSidechain":false}\n' \
         "$(json_escape "$line")" "$(now)" "$(json_escape "$PWD")" "$session_id" >> "$file"
       echo "echo: $line"
-      hook Stop ;;
+      context=$((context + 30000)); [ "$context" -gt 200000 ] && context=200000
+      hook Stop
+      status_line ;;
   esac
 }
 

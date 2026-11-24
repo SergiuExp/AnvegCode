@@ -20,6 +20,69 @@ use serde_json::json;
 /// starts a new session id in the same process.
 pub const TERMINAL_ID_ENV: &str = "ANVEG_TERMINAL_ID";
 
+/// The event name `anveg-hook statusline` sends: Claude Code's status
+/// line data (model, effort, context), not a hook.
+pub const STATUS_LINE_EVENT: &str = "StatusLine";
+
+/// The user's own status line command, run by `anveg-hook statusline` so
+/// their status line still shows in Claude Code.
+pub const USER_STATUS_LINE_ENV: &str = "ANVEG_USER_STATUSLINE";
+
+/// What the session toolbar shows, from Claude Code's status line JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusLineInfo {
+    pub model_id: Option<String>,
+    /// e.g. "Opus 5.5".
+    pub model_name: Option<String>,
+    /// e.g. "high".
+    pub effort: Option<String>,
+    /// 0–100.
+    pub used_percentage: Option<u8>,
+    pub context_window_size: Option<u64>,
+    pub context_tokens: Option<u64>,
+}
+
+/// How full a session's context window is, for the bar above sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextUse {
+    /// 0–100.
+    pub percent: u8,
+    pub tokens: Option<u64>,
+    pub window: Option<u64>,
+    /// Worked out from the transcript (Claude Code's status line is off
+    /// or has not reported yet), so only roughly right.
+    pub estimated: bool,
+}
+
+/// The context use from the status line, else an estimate from the
+/// transcript's last reply: its tokens against a 200k window, or 1M when
+/// it is already past 200k.
+pub fn context_use(line: Option<&StatusLineInfo>, transcript_tokens: Option<u64>) -> Option<ContextUse> {
+    if let Some(line) = line
+        && let Some(percent) = line.used_percentage
+    {
+        return Some(ContextUse {
+            percent: percent.min(100),
+            tokens: line.context_tokens,
+            window: line.context_window_size,
+            estimated: false,
+        });
+    }
+    let tokens = transcript_tokens?;
+    let window = line
+        .and_then(|l| l.context_window_size)
+        .filter(|&w| w > 0)
+        .unwrap_or(if tokens > 200_000 { 1_000_000 } else { 200_000 });
+    let percent = (tokens.saturating_mul(100) + window / 2) / window;
+    Some(ContextUse {
+        percent: percent.min(100) as u8,
+        tokens: Some(tokens),
+        window: Some(window),
+        estimated: true,
+    })
+}
+
 /// The hook events the app listens to.
 pub const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -49,6 +112,8 @@ pub struct HookMessage {
     pub terminal_id: Option<String>,
     /// Unix ms when the hook ran.
     pub ts: i64,
+    /// [`STATUS_LINE_EVENT`] only.
+    pub status_line: Option<StatusLineInfo>,
 }
 
 impl HookMessage {
@@ -67,6 +132,7 @@ impl HookMessage {
             cwd: s("cwd"),
             terminal_id,
             ts,
+            status_line: None,
         }
     }
 }
@@ -158,6 +224,23 @@ pub fn hooks_settings(hook_binary: &Path) -> serde_json::Value {
     json!({ "hooks": map })
 }
 
+/// [`hooks_settings`] plus a status line that runs `anveg-hook statusline`,
+/// for the session toolbar's context meter, model and effort.
+pub fn hooks_settings_with_status_line(hook_binary: &Path) -> serde_json::Value {
+    let mut settings = hooks_settings(hook_binary);
+    let command = format!(
+        "{} statusline",
+        shell_words::quote(&hook_binary.to_string_lossy())
+    );
+    if let Some(map) = settings.as_object_mut() {
+        map.insert(
+            "statusLine".to_owned(),
+            json!({ "type": "command", "command": command, "padding": 0 }),
+        );
+    }
+    settings
+}
+
 /// Listens on a Unix socket for [`HookMessage`] lines.
 #[cfg(unix)]
 pub struct HookServer {
@@ -211,6 +294,23 @@ impl Drop for HookServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_line_settings_keep_the_hooks() {
+        let v = hooks_settings_with_status_line(Path::new("/A pp/anveg-hook"));
+        assert!(v["hooks"]["Stop"].is_array());
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["command"], "'/A pp/anveg-hook' statusline");
+        // A status line message changes no status.
+        let s = next_status(
+            SessionStatus::Working,
+            &StatusEvent::Hook {
+                event: STATUS_LINE_EVENT.into(),
+                notification_type: None,
+            },
+        );
+        assert_eq!(s, SessionStatus::Working);
+    }
 
     fn hook(event: &str) -> StatusEvent {
         StatusEvent::Hook {
@@ -320,5 +420,34 @@ mod tests {
         drop(server);
         assert!(!path.exists());
         Ok(())
+    }
+
+    #[test]
+    fn context_use_prefers_the_status_line() {
+        let line = StatusLineInfo {
+            used_percentage: Some(42),
+            context_tokens: Some(84_000),
+            context_window_size: Some(200_000),
+            ..Default::default()
+        };
+        let u = context_use(Some(&line), Some(10)).map(|u| (u.percent, u.estimated, u.tokens));
+        assert_eq!(u, Some((42, false, Some(84_000))));
+    }
+
+    #[test]
+    fn context_use_estimates_from_the_transcript() {
+        assert_eq!(context_use(None, None), None);
+        let u = context_use(None, Some(50_000)).map(|u| (u.percent, u.window, u.estimated));
+        assert_eq!(u, Some((25, Some(200_000), true)));
+        // Past 200k: it must be a 1M window.
+        let u = context_use(None, Some(300_000)).map(|u| (u.percent, u.window));
+        assert_eq!(u, Some((30, Some(1_000_000))));
+        // A status line without a percentage still gives the window.
+        let line = StatusLineInfo {
+            context_window_size: Some(100_000),
+            ..Default::default()
+        };
+        let u = context_use(Some(&line), Some(150_000)).map(|u| u.percent);
+        assert_eq!(u, Some(100));
     }
 }

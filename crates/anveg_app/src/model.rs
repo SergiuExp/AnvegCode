@@ -43,7 +43,7 @@ pub enum ModelEvent {
     /// The projects list changed (saved already).
     ProjectsChanged,
     /// A hook event arrived from `anveg-hook`.
-    Hook(HookMessage),
+    Hook(Box<HookMessage>),
     /// The number of sessions needing input changed somewhere.
     AttentionChanged,
     /// Phase 6: `gh` was (re)detected.
@@ -63,6 +63,8 @@ pub struct HookSetup {
     _server: HookServer,
     pub socket: PathBuf,
     pub settings_file: PathBuf,
+    /// The same hooks plus the status line that feeds the session toolbar.
+    pub settings_file_status_line: PathBuf,
 }
 
 pub struct AppModel {
@@ -412,6 +414,16 @@ impl AppModel {
             tracing::error!(%error, "could not write hooks settings; live status is off");
             return;
         }
+        let settings_file_status_line = self
+            .paths
+            .support_dir
+            .join("hooks-statusline-settings.json");
+        if let Err(error) = anveg_core::atomic::write_json(
+            &settings_file_status_line,
+            &anveg_core::status::hooks_settings_with_status_line(&binary),
+        ) {
+            tracing::warn!(%error, "could not write the status line settings");
+        }
         // Unix socket paths are limited to ~104 bytes on macOS; fall back to
         // a short path in the temp directory when the support path is long.
         let mut socket = self.paths.support_dir.join("run").join("hooks.sock");
@@ -432,11 +444,12 @@ impl AppModel {
             _server: server,
             socket,
             settings_file,
+            settings_file_status_line,
         });
         self._hook_task = Some(cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
                 if this
-                    .update(cx, |_, cx| cx.emit(ModelEvent::Hook(message)))
+                    .update(cx, |_, cx| cx.emit(ModelEvent::Hook(Box::new(message))))
                     .is_err()
                 {
                     break;

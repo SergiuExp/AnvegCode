@@ -7,6 +7,12 @@
 //!
 //! The line has the shape of `anveg_core::status::HookMessage`:
 //! `{event, session_id, notification_type, source, cwd, terminal_id, ts}`.
+//!
+//! `anveg-hook statusline` is Claude Code's status line command instead
+//! (when the app's session toolbar reads it): it sends the model, effort
+//! and context use as a `StatusLine` message, then runs the user's own
+//! status line command (`$ANVEG_USER_STATUSLINE`) with the same input and
+//! passes its output through, so their status line still shows.
 
 use std::io::{Read as _, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,19 +21,105 @@ const TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_INPUT: u64 = 1024 * 1024;
 
 fn main() {
-    let _ = run();
+    if std::env::args().nth(1).as_deref() == Some("statusline") {
+        status_line();
+    } else {
+        let _ = run();
+    }
     std::process::exit(0);
 }
 
-fn run() -> Option<()> {
-    let socket = std::env::var_os("ANVEG_HOOK_SOCKET")?;
+fn read_input() -> Option<Vec<u8>> {
     let mut input = Vec::new();
     std::io::stdin()
         .take(MAX_INPUT)
         .read_to_end(&mut input)
         .ok()?;
+    Some(input)
+}
+
+fn run() -> Option<()> {
+    let socket = std::env::var_os("ANVEG_HOOK_SOCKET")?;
+    let input = read_input()?;
     let line = message(&input, std::env::var("ANVEG_TERMINAL_ID").ok())?;
     send(std::path::Path::new(&socket), &line)
+}
+
+/// Claude Code's status line: report to the app, then show the user's own.
+fn status_line() {
+    let Some(input) = read_input() else {
+        return;
+    };
+    if let Some(socket) = std::env::var_os("ANVEG_HOOK_SOCKET")
+        && let Some(line) = status_message(&input, std::env::var("ANVEG_TERMINAL_ID").ok())
+    {
+        let _ = send(std::path::Path::new(&socket), &line);
+    }
+    if let Ok(command) = std::env::var("ANVEG_USER_STATUSLINE")
+        && !command.trim().is_empty()
+    {
+        run_user_status_line(&command, &input);
+    }
+}
+
+/// Run the user's status line command with Claude Code's input; its output
+/// goes straight to Claude Code.
+fn run_user_status_line(command: &str, input: &[u8]) {
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input);
+    }
+    let _ = child.wait();
+}
+
+/// The `StatusLine` message for Claude Code's status line JSON.
+fn status_message(input: &[u8], terminal_id: Option<String>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(input).ok()?;
+    let str_at = |path: &[&str]| {
+        let mut cur = &v;
+        for key in path {
+            cur = cur.get(*key)?;
+        }
+        cur.as_str().map(str::to_owned)
+    };
+    let num_at = |path: &[&str]| {
+        let mut cur = &v;
+        for key in path {
+            cur = cur.get(*key)?;
+        }
+        cur.as_f64()
+    };
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let out = serde_json::json!({
+        "event": "StatusLine",
+        "session_id": str_at(&["session_id"]),
+        "terminal_id": terminal_id,
+        "ts": ts,
+        "status_line": {
+            "model_id": str_at(&["model", "id"]),
+            "model_name": str_at(&["model", "display_name"]),
+            "effort": str_at(&["effort", "level"]),
+            "used_percentage": num_at(&["context_window", "used_percentage"])
+                .map(|p| p.clamp(0.0, 100.0).round() as u8),
+            "context_window_size": num_at(&["context_window", "context_window_size"])
+                .map(|n| n as u64),
+            "context_tokens": num_at(&["context_window", "total_input_tokens"]).map(|n| n as u64),
+        },
+    });
+    serde_json::to_string(&out).ok()
 }
 
 /// The line to send for a hook's stdin JSON.
@@ -82,6 +174,22 @@ mod tests {
         assert_eq!(v["terminal_id"], "t1");
         assert!(v["notification_type"].is_null());
         assert!(v["ts"].as_i64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn status_line_message() {
+        let input = br#"{"session_id":"s","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+            "effort":{"level":"high"},"context_window":{"total_input_tokens":62000,
+            "context_window_size":200000,"used_percentage":31.4,"remaining_percentage":68.6}}"#;
+        let line = status_message(input, Some("t".into())).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        assert_eq!(v["event"], "StatusLine");
+        assert_eq!(v["status_line"]["model_name"], "Opus 5.5");
+        assert_eq!(v["status_line"]["effort"], "high");
+        assert_eq!(v["status_line"]["used_percentage"], 31);
+        assert_eq!(v["status_line"]["context_window_size"], 200000);
+        // Older versions without these fields still give a message.
+        assert!(status_message(br#"{"session_id":"s"}"#, None).is_some());
     }
 
     #[test]

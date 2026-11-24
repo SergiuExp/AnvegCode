@@ -43,6 +43,9 @@ pub struct SessionInfo {
     pub transcript: PathBuf,
     /// The worktree name, for sessions in `<main>/.claude/worktrees/<name>`.
     pub worktree: Option<String>,
+    /// From the latest reply (see `TranscriptMeta::context_tokens`).
+    pub context_tokens: Option<u64>,
+    pub model: Option<String>,
 }
 
 impl SessionInfo {
@@ -236,6 +239,8 @@ impl SessionIndex {
                     last_activity: meta.last_activity.unwrap_or(cached.mtime),
                     created: meta.first_activity,
                     git_branch: meta.git_branch.clone(),
+                    context_tokens: meta.context_tokens,
+                    model: meta.model.clone(),
                     non_interactive,
                     transcript: path.clone(),
                     worktree: worktree_of(path),

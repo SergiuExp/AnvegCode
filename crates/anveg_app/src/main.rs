@@ -5,6 +5,7 @@
 //! the right. See `docs/build-plan.md`.
 
 mod actions;
+mod app_assets;
 mod component_theme;
 mod dialogs;
 mod diff_view;
@@ -25,6 +26,8 @@ mod panes;
 mod platform;
 mod project_window;
 mod settings_window;
+mod session_buttons_view;
+mod session_toolbar;
 mod sidebar;
 mod ui;
 mod welcome;
@@ -52,7 +55,7 @@ fn main() {
     let _log_guard = logging::init(&paths);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Anveg Code starting");
 
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(app_assets::AppAssets);
     // Clicking the Dock icon with no windows open.
     app.on_reopen(|cx| {
         if cx.has_global::<ModelHandle>() && model(cx).read(cx).windows.is_empty() {

@@ -472,6 +472,17 @@ impl Render for SettingsWindow {
                         )
                     })
                     .child(self.row(
+                        "Context, model and effort above sessions",
+                        Some("Read from Claude Code's status line (your own status line still runs). For sessions started after the change; when off, context use is estimated (≈) from the transcript."),
+                        self.switch(
+                            "s-status-line",
+                            s.session_status_line,
+                            |s, v| s.session_status_line = v,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(self.row(
                         "Notifications",
                         Some("When a session you're not looking at needs input or finishes."),
                         self.switch("s-notify", s.notifications, |s, v| s.notifications = v, cx),

@@ -392,7 +392,9 @@ impl ProjectWindow {
         // subscription stays until the next dialog, so a retry still works.
         self.dialog = None;
         let weak = cx.entity().downgrade();
-        cx.defer_in(window, move |_, window, cx| {
+        // Run it outside this window's update: actions may update the
+        // window (or ask it to close).
+        window.defer(cx, move |window, cx| {
             if let Err(message) = action(value, window, cx) {
                 let _ = weak.update(cx, |this, cx| {
                     if let Some((prompt, input)) = saved {

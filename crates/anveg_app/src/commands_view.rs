@@ -8,7 +8,7 @@ use gpui_cn::{Input, InputEvent, InputState, Switch};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use uuid::Uuid;
 
@@ -30,6 +30,8 @@ struct Row {
     command: Entity<InputState>,
     shortcut: Entity<InputState>,
     error: Option<SharedString>,
+    /// A save waiting for typing to stop, per field.
+    saves: [Option<Task<()>>; 3],
     _subs: Vec<Subscription>,
 }
 
@@ -118,10 +120,15 @@ impl CommandsView {
             (&shortcut, Field::Shortcut),
         ] {
             let id = c.id.clone();
-            subs.push(cx.subscribe(state, move |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+            subs.push(cx.subscribe(state, move |this, _, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.cancel_save(&id, field);
                     this.apply(&id, field, cx);
                 }
+                // Saved a moment after typing stops (the field may never
+                // report losing focus).
+                InputEvent::Change => this.schedule_save(&id, field, cx),
+                _ => {}
             }));
         }
         Row {
@@ -130,6 +137,7 @@ impl CommandsView {
             command,
             shortcut,
             error: None,
+            saves: Default::default(),
             _subs: subs,
         }
     }
@@ -143,6 +151,28 @@ impl CommandsView {
                 }
             })
         });
+    }
+
+    fn cancel_save(&mut self, id: &str, field: Field) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.id == id) {
+            row.saves[field as usize] = None;
+        }
+    }
+
+    fn schedule_save(&mut self, id: &str, field: Field, cx: &mut Context<Self>) {
+        let key = id.to_owned();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(600))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.cancel_save(&key, field);
+                this.apply(&key, field, cx);
+            });
+        });
+        if let Some(row) = self.rows.iter_mut().find(|r| r.id == id) {
+            row.saves[field as usize] = Some(task);
+        }
     }
 
     fn apply(&mut self, id: &str, field: Field, cx: &mut Context<Self>) {

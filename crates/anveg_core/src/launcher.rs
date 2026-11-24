@@ -129,6 +129,9 @@ pub struct ClaudeOptions {
     pub hooks_settings: Option<PathBuf>,
     /// Phase 2: the socket `anveg-hook` reports to.
     pub hook_socket: Option<PathBuf>,
+    /// The user's own status line command, run by `anveg-hook statusline`
+    /// (only when the app's status line is in the settings file).
+    pub user_status_line: Option<String>,
     /// Notes: the first message of a new session (`claude -- <prompt>`),
     /// sent as if typed and submitted.
     pub initial_prompt: Option<String>,
@@ -214,6 +217,9 @@ pub fn claude_launch(
     let mut spec =
         LaunchSpec::program(claude, claude_args(start, options), Some(cwd.to_path_buf()))
             .with_child_env(env);
+    if let Some(line) = &options.user_status_line {
+        spec = spec.with_env(crate::status::USER_STATUS_LINE_ENV, line.clone());
+    }
     if let Some(socket) = &options.hook_socket {
         spec = spec.with_env(HOOK_SOCKET_ENV, socket.to_string_lossy());
     }
@@ -271,6 +277,7 @@ mod tests {
             hooks_settings: None,
             hook_socket: None,
             initial_prompt: None,
+            user_status_line: None,
         }
     }
 

@@ -230,6 +230,30 @@ pub fn parse_auth_status_config_dir(out: &[u8]) -> Option<PathBuf> {
     status.config_directory
 }
 
+/// The user's own status line command, if they set one: from the project's
+/// `.claude/settings.local.json`, then `.claude/settings.json`, then
+/// `<config dir>/settings.json` (Claude Code's precedence). Only read.
+pub fn user_status_line(config_dir: &Path, project_dir: &Path) -> Option<String> {
+    let files = [
+        project_dir.join(".claude").join("settings.local.json"),
+        project_dir.join(".claude").join("settings.json"),
+        config_dir.join("settings.json"),
+    ];
+    files.iter().find_map(|file| {
+        let text = std::fs::read_to_string(file).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let line = value.get("statusLine")?;
+        if line.get("type").and_then(|t| t.as_str()).unwrap_or("command") != "command" {
+            return None;
+        }
+        line.get("command")
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
 pub fn fallback_config_dir(env: &EnvMap) -> PathBuf {
     if let Some(dir) = env.get("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
@@ -311,6 +335,27 @@ pub fn detect_claude(override_path: Option<&Path>, env: &EnvMap) -> ClaudeInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_users_status_line() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let config = tmp.path().join("cfg");
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(project.join(".claude"))?;
+        std::fs::create_dir_all(&config)?;
+        assert_eq!(user_status_line(&config, &project), None);
+        std::fs::write(
+            config.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"~/bin/line.sh"}}"#,
+        )?;
+        assert_eq!(user_status_line(&config, &project).as_deref(), Some("~/bin/line.sh"));
+        std::fs::write(
+            project.join(".claude").join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"echo project"}}"#,
+        )?;
+        assert_eq!(user_status_line(&config, &project).as_deref(), Some("echo project"));
+        Ok(())
+    }
 
     #[test]
     fn parses_env_after_the_marker_only() {

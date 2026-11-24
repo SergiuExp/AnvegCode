@@ -691,7 +691,7 @@ The owner found the selected session hard to see, especially in dark mode: the r
 
 **Done**
 - Per-project **toolbar commands**: a name, a shell command, an optional shortcut, "Show in toolbar", and "New terminal each time". Stored with the project in `projects.json` (app data folder; nothing in the project).
-- Their **buttons** sit in the top bar, right of the tabs, in the order set in the editor; a gear button (and File ▸ Toolbar Commands…) opens the editor as a tab: add, edit (saved on Enter or when a field loses focus), Run, reorder (↑/↓), show/hide in the toolbar, delete (asks).
+- Their **buttons** sit in the top bar, right of the tabs, in the order set in the editor; a gear button (and File ▸ Toolbar Commands…) opens the editor as a tab: add, edit (saved on Enter or a moment after you stop typing), Run, reorder (↑/↓), show/hide in the toolbar, delete (asks).
 - **Running a command** types it into an interactive login shell in the project's main folder, in a terminal tab named after the command:
   - by default each command has **its own tab** and reuses it: if the last run is still going (a program other than the shell is in the foreground), it sends **Ctrl-C** first, then runs again; if the tab's shell has exited, a new shell starts in it;
   - with **New terminal each time**, every run opens a new tab.
@@ -742,3 +742,33 @@ The owner picked option D, "Session Orbit", from six concepts on a Claude Design
 **Manual checks (Mac)**
 - [ ] `scripts/install-macos.sh --open`: the Dock, Finder, Launchpad and ⌘-Tab show the new icon.
 - [ ] If an old generic icon sticks in the Dock, remove the app from the Dock and add it again (macOS caches icons).
+
+---
+
+## Session bar (owner's request, 2026-11-24)
+
+A bar above every Claude session (main and split pane). The owner chose: compact next to the context meter, not in the ⋯ menu; buttons disabled when the session can't take them (except the few that work mid-turn, such as /btw); the context display can be turned off in Settings; and buttons of their own.
+
+**Done**
+- **Bar:** Model (shows the current model, sends `/model`), Effort (shows the level, `/effort`), the **context meter** (bar and %, amber from 70 %, red from 85 %, tokens in its tooltip) right next to **Compact** (`/compact`), **Stop** (Esc: interrupts a turn or dismisses a dialog), **Rewind** (`/rewind`), **Clear** (`/clear`, asks first), a **⋯ menu** (/context, /usage, /status, /memory, /init, /recap, /export, /plan, Side Question… = `/btw` with a question you type, Edit Session Buttons…), your **own buttons**, and a gear that opens their editor. Not shown when the session isn't running.
+- **What is usable:** waiting for a prompt: everything. Working: Stop, /btw and own buttons marked "Usable while Claude is working". A permission or question dialog open: only Stop (typing would answer it). Ended: nothing.
+- **Sending:** a one-line command is typed, a multi-line one pasted; Enter follows 150 ms later (as for /rename). The keyboard then goes to the session, so pickers such as /model can be driven at once.
+- **Model, effort and context come from Claude Code's status line.** For sessions the app starts, its `--settings` file (in the app's data folder) sets `statusLine` to `anveg-hook statusline`, which forwards model, effort and context-window numbers to the app over the hook socket and then runs **your own** status line command (project `.claude/settings.local.json`, then `.claude/settings.json`, then `~/.claude/settings.json`) with the same input, so your terminal status line still shows. Nothing in your Claude Code configuration is changed.
+- **Setting:** Settings ▸ Status and resources ▸ "Context, model and effort above sessions" (on by default; applies to sessions started afterwards). Off, the app does not set a status line; the meter is then **estimated** ("≈") from the transcript's last reply (input + cache tokens against 200k, or 1M once past 200k), and the model comes from the transcript.
+- **Own buttons** (Session Buttons tab; also from the ⋯ menu): label, the text to send, "Usable while Claude is working", reorder, delete (asks). App-wide, in `settings.json`.
+- Extra Lucide icons (brain, fold-vertical, circle-stop, eraser) through a small asset source (`app_assets.rs`) on top of gpui-kit's default set.
+
+**Fixed on the way**
+- Prompt buttons ran inside the window's own update, so an action that updated the window panicked ("already being updated"); this also affected "Don't Save" in the unsaved-files prompt. They now run deferred on the window.
+- Text fields in the Toolbar Commands editor (and the new Session Buttons editor) were meant to save when they lose focus, but the input never reports that here; they now also save 600 ms after typing stops.
+
+**Verified under Xvfb** (fake-claude now runs the status line command: +30k tokens per prompt, `/compact` → 10k, `/effort X`): the bar with "Fake 1", "Effort: high", 0 % → 30 % after two prompts → 5 % after Compact; Effort changing to "max"; amber at 75 % (dark theme); Clear asking first; the ⋯ menu; Side Question sending `/btw …`; adding two own buttons (both appear; one sends its text); the setting off: "≈25 %" from the transcript, the model from the transcript, the plain hooks file used.
+
+**Manual checks**
+- [ ] Start a session: Model and Effort show the real model and level after the first reply; the meter shows the same % as `/context`.
+- [ ] Click Model: the /model picker opens and takes the arrow keys at once.
+- [ ] During a long turn: only Stop, Side Question and "while working" buttons are enabled; Stop interrupts.
+- [ ] On a permission prompt: only Stop is enabled.
+- [ ] Compact: the meter drops after compaction.
+- [ ] With your own status line in `~/.claude/settings.json`: it still shows at the bottom of Claude's UI.
+- [ ] Settings: turn the status line off, start a new session: the meter shows "≈".

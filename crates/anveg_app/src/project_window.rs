@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anveg_core::claude_env;
 use anveg_core::config::{
     PaneContent, Project, RightTab, SavedBounds, SidebarTab, WindowState,
 };
@@ -65,6 +66,8 @@ pub struct Running {
     /// The worktree it runs in, if any.
     pub worktree: Option<String>,
     pub memory: Option<u64>,
+    /// Model, effort and context from Claude Code's status line.
+    pub line: Option<status::StatusLineInfo>,
     idle_timer: Option<Task<()>>,
     _events: Subscription,
 }
@@ -216,6 +219,8 @@ pub struct ProjectWindow {
     pub toast: Option<SharedString>,
     toast_task: Option<Task<()>>,
     pub context_menu: Entity<MenuState>,
+    /// The “⋯” menus of the session bars: main pane, split pane.
+    pub session_menus: [Entity<MenuState>; 2],
     close_confirmed: bool,
     /// The user chose to close or quit without saving.
     pub unsaved_ok: bool,
@@ -259,6 +264,10 @@ impl ProjectWindow {
         subscriptions.push(cx.subscribe_in(&model, window, Self::on_model_event));
         let context_menu = cx.new(MenuState::new);
         subscriptions.push(cx.observe(&context_menu, |_, _, cx| cx.notify()));
+        let session_menus = [cx.new(MenuState::new), cx.new(MenuState::new)];
+        for menu in &session_menus {
+            subscriptions.push(cx.observe(menu, |_, _, cx| cx.notify()));
+        }
 
         let saved = saved.unwrap_or_else(|| WindowState::new(project_id));
         let sidebar_state = cx.new(|_| ResizableState::default());
@@ -414,6 +423,7 @@ impl ProjectWindow {
             toast: None,
             toast_task: None,
             context_menu,
+            session_menus,
             close_confirmed: false,
             unsaved_ok: false,
             pending_resume: resume,
@@ -911,6 +921,8 @@ impl ProjectWindow {
                 non_interactive: false,
                 transcript,
                 worktree,
+                context_tokens: None,
+                model: None,
             },
         );
         self.rebuild_rows(cx);
@@ -967,10 +979,23 @@ impl ProjectWindow {
                 return false;
             }
         };
+        // The session toolbar reads Claude Code's status line unless that is
+        // turned off; the user's own status line keeps showing through it.
+        let status_line = m.settings.session_status_line;
+        let user_status_line = status_line
+            .then(|| claude_env::user_status_line(&m.config_dir(), &project.main_folder))
+            .flatten();
         let options = ClaudeOptions {
             extra_folders: project.extra_folders.clone(),
             default_flags,
-            hooks_settings: m.hooks.as_ref().map(|h| h.settings_file.clone()),
+            user_status_line,
+            hooks_settings: m.hooks.as_ref().map(|h| {
+                if status_line && h.settings_file_status_line.is_file() {
+                    h.settings_file_status_line.clone()
+                } else {
+                    h.settings_file.clone()
+                }
+            }),
             hook_socket: m.hooks.as_ref().map(|h| h.socket.clone()),
             initial_prompt,
         };
@@ -1015,6 +1040,7 @@ impl ProjectWindow {
                 pending_rename: None,
                 worktree,
                 memory: None,
+                line: None,
                 idle_timer: None,
                 _events: events,
             },
@@ -1706,6 +1732,20 @@ impl ProjectWindow {
         cx: &mut Context<Self>,
     ) {
         tracing::debug!(event = %message.event, session = %message.session_id, "hook");
+        // Status line data: just store it for the session toolbar.
+        if message.event == status::STATUS_LINE_EVENT {
+            let key = message
+                .terminal_id
+                .as_deref()
+                .and_then(|t| self.running_key_for_terminal(t));
+            if let Some(r) = key.and_then(|k| self.running.get_mut(&k))
+                && r.line != message.status_line
+            {
+                r.line = message.status_line.clone();
+                cx.notify();
+            }
+            return;
+        }
         let key = message
             .terminal_id
             .as_deref()

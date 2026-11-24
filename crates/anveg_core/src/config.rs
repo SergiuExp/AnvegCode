@@ -67,6 +67,35 @@ pub struct Settings {
     pub lsp_servers: BTreeMap<String, String>,
     /// Phase 5: how Pull integrates (fast-forward only by default).
     pub pull_mode: PullMode,
+    /// Session toolbar: read model, effort and context from Claude Code's
+    /// status line (the user's own status line still shows). Off: an
+    /// estimate from the transcript.
+    pub session_status_line: bool,
+    /// Session toolbar: the user's own buttons.
+    pub session_buttons: Vec<SessionButton>,
+}
+
+/// A button on the session toolbar that types text into Claude Code's
+/// prompt and presses Enter (a slash command, a skill, a prompt).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionButton {
+    pub id: String,
+    pub label: String,
+    pub text: String,
+    /// Usable while Claude is working (otherwise only when it is idle).
+    #[serde(default)]
+    pub while_working: bool,
+}
+
+impl SessionButton {
+    pub fn new(label: &str, text: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: label.to_owned(),
+            text: text.to_owned(),
+            while_working: false,
+        }
+    }
 }
 
 /// Editor preferences (Settings ▸ Editor).
@@ -109,6 +138,8 @@ impl Default for Settings {
             editor: EditorPrefs::default(),
             lsp_servers: default_lsp_servers(),
             pull_mode: PullMode::default(),
+            session_status_line: true,
+            session_buttons: Vec::new(),
         }
     }
 }
@@ -352,6 +383,8 @@ pub enum DocKey {
     },
     /// The project's toolbar commands editor.
     Commands,
+    /// The editor for the custom buttons above Claude sessions (global).
+    SessionButtons,
     /// The form for a new pull request from the current branch.
     CreatePullRequest {
         repo: PathBuf,

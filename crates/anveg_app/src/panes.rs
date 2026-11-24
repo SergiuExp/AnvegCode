@@ -198,7 +198,7 @@ impl ProjectWindow {
                         })),
                 )
                 .into_any_element(),
-            Some(PaneView::Session(id)) => self.render_session_pane(&id, cx),
+            Some(PaneView::Session(id)) => self.render_session_pane(&id, is_split, cx),
             Some(PaneView::Terminal(i)) => self.render_terminal_pane(i, cx),
             Some(PaneView::Doc(i)) => match self.docs.get(i).and_then(|d| d.view.clone()) {
                 Some(view) => view.element(),
@@ -280,7 +280,7 @@ impl ProjectWindow {
             .into_any_element()
     }
 
-    fn render_session_pane(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_pane(&mut self, id: &str, is_split: bool, cx: &mut Context<Self>) -> AnyElement {
         let c = Colors::of(cx);
         let Some(running) = self.running.get(id) else {
             let looking = self.model.read(cx).claude.is_none();
@@ -315,20 +315,31 @@ impl ProjectWindow {
         };
         let view = running.view.clone();
         let ended = running.ended.clone();
+        let toolbar = self.render_session_toolbar(id, is_split, cx);
         let id = id.to_owned();
         div()
             .size_full()
-            .relative()
-            .child(view)
-            .when_some(ended, |el, ended| {
-                el.child(self.ended_overlay(
-                    "Session ended",
-                    &ended,
-                    "Resume",
-                    cx.listener(move |this, _, window, cx| this.open_session(&id, window, cx)),
-                    cx,
-                ))
-            })
+            .flex()
+            .flex_col()
+            .child(toolbar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(view)
+                    .when_some(ended, |el, ended| {
+                        el.child(self.ended_overlay(
+                            "Session ended",
+                            &ended,
+                            "Resume",
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_session(&id, window, cx)
+                            }),
+                            cx,
+                        ))
+                    }),
+            )
             .into_any_element()
     }
 
