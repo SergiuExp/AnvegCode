@@ -18,16 +18,26 @@
 
 mod meta;
 
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use anveg_core::files::{PathLink, path_link_at};
 use anveg_core::launcher::LaunchSpec;
 use gpui_cn::terminal::{
     EngineOptions, LocalTerminalOptions, Terminal, TerminalAppearance, TerminalColors,
     TerminalConfig, TerminalEvent, TerminalState, TerminalStatus, WorkingDirectory,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, WindowAppearance, div, px,
+    App, AppContext as _, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription,
+    Window, WindowAppearance, canvas, div, px,
 };
+
+/// The terminal's inner padding, set explicitly so ⌘-click can map a
+/// pointer position to a cell.
+const PADDING: f32 = 6.0;
 
 /// Set up the terminal engine and its UI. Call once, after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
@@ -112,6 +122,9 @@ pub enum TerminalViewEvent {
     Exited(ExitInfo),
     /// The program could not be started.
     Failed(SharedString),
+    /// ⌘-click on `path[:line[:col]]` in the output. `cwd` is the shell's
+    /// working directory when it reports one (OSC 7).
+    OpenPath { link: PathLink, cwd: Option<PathBuf> },
 }
 
 /// Where a terminal's program is in its life.
@@ -132,6 +145,8 @@ pub struct TerminalView {
     id: ElementId,
     state: Entity<TerminalState>,
     option_as_meta: bool,
+    /// Where the terminal was last drawn.
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -167,6 +182,7 @@ impl TerminalView {
             id: id.into(),
             state,
             option_as_meta: settings.option_as_meta,
+            bounds: Rc::default(),
             _subscriptions: [events, frames, appearance],
         }
     }
@@ -250,6 +266,13 @@ impl TerminalView {
         self.state.update(cx, |state, cx| state.send_text(text, cx));
     }
 
+    /// Type `text` as a paste (bracketed when the program asks for it), so
+    /// a newline in it is never taken as Enter.
+    pub fn paste_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.state.update(cx, |state, cx| state.paste_text(text, cx));
+    }
+
     /// Stop the program: SIGHUP, then SIGTERM, then SIGKILL to its process
     /// group. Idempotent.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -282,6 +305,64 @@ impl TerminalView {
     }
 }
 
+impl TerminalView {
+    /// ⌘-click: a `path:line` under the pointer opens in the editor. URLs
+    /// are left to the engine, which opens them in the browser.
+    fn on_capture_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left || !event.modifiers.platform {
+            return;
+        }
+        let Some(bounds) = self.bounds.get() else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let frame = state.frame();
+        let scale = window.scale_factor().max(1.0);
+        let cell_w = frame.viewport.cell_width() as f32 / scale;
+        let cell_h = frame.viewport.cell_height() as f32 / scale;
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+        let x = f32::from(event.position.x - bounds.origin.x) - PADDING;
+        let y = f32::from(event.position.y - bounds.origin.y) - PADDING;
+        if x < 0.0 || y < 0.0 {
+            return;
+        }
+        let (col, row) = ((x / cell_w) as u16, (y / cell_h) as usize);
+        let Some(row) = frame.rows.get(row) else {
+            return;
+        };
+        // The cell's character index in the row text.
+        let Some(cell) = row
+            .cells
+            .iter()
+            .rev()
+            .find(|c| !c.spacer && c.column <= col)
+        else {
+            return;
+        };
+        if cell.hyperlink.is_some() {
+            return;
+        }
+        let start = cell.text.start.min(row.text.len());
+        let Some(prefix) = row.text.get(..start) else {
+            return;
+        };
+        let index = prefix.chars().count();
+        let Some(link) = path_link_at(&row.text, index) else {
+            return;
+        };
+        let cwd = state.cwd().map(PathBuf::from);
+        cx.emit(TerminalViewEvent::OpenPath { link, cwd });
+        cx.stop_propagation();
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.state.read(cx).focus_handle().clone()
@@ -290,10 +371,18 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let bounds = self.bounds.clone();
         div()
             .size_full()
+            .relative()
             .capture_key_down(cx.listener(Self::on_capture_key_down))
+            .capture_any_mouse_down(cx.listener(Self::on_capture_mouse_down))
             .child(Terminal::new(self.id.clone(), &self.state))
+            .child(
+                canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
     }
 }
 
@@ -337,6 +426,7 @@ fn appearance(settings: &TerminalSettings) -> TerminalAppearance {
         .with_font_family(settings.font_family.clone())
         .with_font_size(px(settings.font_size))
         .with_cursor_blink(Some(settings.cursor_blink))
+        .with_padding(px(PADDING))
 }
 
 fn local_options(spec: &LaunchSpec, settings: &TerminalSettings) -> LocalTerminalOptions {

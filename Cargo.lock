@@ -186,6 +186,7 @@ name = "anveg_app"
 version = "0.1.0"
 dependencies = [
  "anveg_core",
+ "anveg_lsp",
  "anveg_term",
  "anyhow",
  "block2 0.6.2",
@@ -196,10 +197,12 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
+ "serde_json",
  "shell-words",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "trash",
  "uuid",
 ]
 

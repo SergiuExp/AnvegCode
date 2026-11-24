@@ -86,7 +86,6 @@ pub fn sync(cx: &mut App) {
         c.selection = selection;
         c.popover = background;
         c.popover_foreground = foreground;
-        c.list = background;
         c.list_hover = accent;
         c.list_active = selection;
         c.caret = foreground;

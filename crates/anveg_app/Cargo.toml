@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 anveg_core.workspace = true
 anveg_term.workspace = true
+anveg_lsp.workspace = true
+serde_json.workspace = true
+trash.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 gpui-cn = { workspace = true, features = ["ghostty"] }

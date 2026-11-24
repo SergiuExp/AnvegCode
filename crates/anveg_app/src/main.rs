@@ -5,7 +5,16 @@
 //! the right. See `docs/build-plan.md`.
 
 mod actions;
+mod component_theme;
 mod dialogs;
+mod diff_view;
+mod docs;
+mod editor_view;
+mod files_panel;
+mod git_panel;
+mod github;
+mod languages;
+mod lsp_manager;
 mod logging;
 mod menus;
 mod model;
@@ -17,6 +26,8 @@ mod sidebar;
 mod ui;
 mod welcome;
 mod windows;
+mod workspace;
+mod workspace_ui;
 
 use std::time::Instant;
 
@@ -48,6 +59,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         anveg_term::init(cx);
+        component_theme::sync(cx);
         actions::bind_keys(cx);
 
         let app_model = cx.new(|cx| AppModel::new(paths, cx));
@@ -124,9 +136,23 @@ fn install_actions(cx: &mut App) {
 }
 
 /// ⌘Q: ask first when sessions are running (and the setting is on).
-fn request_quit(cx: &mut App) {
+pub(crate) fn request_quit(cx: &mut App) {
     tracing::debug!("quit requested");
     let model = model(cx);
+    // Unsaved files first: ask in the window that has them.
+    let unsaved = model.read(cx).windows.iter().find_map(|w| {
+        let view = w.view.upgrade()?;
+        view.read(cx).has_unsaved(cx).then_some((w.handle, view))
+    });
+    if let Some((handle, view)) = unsaved {
+        let _ = handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            view.update(cx, |v, cx| {
+                v.ask_unsaved(true, window, cx);
+            });
+        });
+        return;
+    }
     let running = model.read(cx).running_sessions(cx);
     let confirm = model.read(cx).settings.confirm_on_close;
     if running.is_empty() || !confirm {

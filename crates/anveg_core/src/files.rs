@@ -445,9 +445,32 @@ pub fn rename(from: &Path, new_name: &str) -> Result<PathBuf> {
     Ok(to)
 }
 
+/// A unified diff (git style) from `old` to `new` for `path`, empty when
+/// they are equal. Used for "Compare" (disk against the unsaved buffer).
+pub fn unified_diff(old: &str, new: &str, path: &str) -> String {
+    if old == new {
+        return String::new();
+    }
+    let diff = similar::TextDiff::from_lines(old, new);
+    let body = diff
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string();
+    format!("diff --git a/{path} b/{path}\n{body}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unified_diffs() {
+        assert_eq!(unified_diff("a\n", "a\n", "x"), "");
+        let d = unified_diff("a\nb\n", "a\nc\n", "x.rs");
+        assert!(d.starts_with("diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@"));
+        assert!(d.contains("-b\n+c\n"));
+    }
 
     #[test]
     fn lists_with_ignore_rules() -> Result<()> {

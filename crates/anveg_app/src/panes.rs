@@ -7,18 +7,42 @@ use gpui_cn::TitleBar;
 use gpui_cn::prelude::*;
 use gpui_kit::base::{h_resizable, resizable_panel};
 use gpui_kit::{
-    AnyElement, Context, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Window, div, px,
+    AnyElement, AppContext as _, Context, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px,
 };
 
 use crate::actions::*;
 use crate::project_window::{DraggedSession, Ended, ProjectWindow, Tab};
+
+/// Dragging a document tab onto a pane (Phase 4).
+#[derive(Clone, Debug)]
+pub struct DraggedDoc {
+    pub key: anveg_core::config::DocKey,
+    pub title: SharedString,
+}
+
+impl gpui_kit::Render for DraggedDoc {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = Colors::of(cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(c.background)
+            .border_1()
+            .border_color(c.border)
+            .text_sm()
+            .child(self.title.clone())
+    }
+}
 use crate::ui::Colors;
 
 /// What a pane shows.
 enum PaneView {
     Session(String),
     Terminal(usize),
+    Doc(usize),
 }
 
 impl ProjectWindow {
@@ -77,6 +101,44 @@ impl ProjectWindow {
                 .tooltip("New Terminal (⌘⇧T)")
                 .on_click(cx.listener(|this, _, window, cx| this.new_terminal(window, cx))),
         );
+        for i in 0..self.docs.len() {
+            let title = self.docs[i].title(cx);
+            let dirty = self.docs[i].is_dirty(cx);
+            let active = self.tab == Tab::Doc(i);
+            let drag = DraggedDoc {
+                key: self.docs[i].key.clone(),
+                title: title.clone().into(),
+            };
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("doc-tab-{i}")))
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .max_w(px(220.))
+                    .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
+                    .child(
+                        Button::new(SharedString::from(format!("tab-doc-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label(if dirty { format!("● {title}") } else { title })
+                            .toggled(active)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.show_doc(i, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("tab-doc-close-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .icon(Icon::from(gpui_kit::assets::IconName::Close))
+                            .tooltip("Close Tab (⌘⇧W)")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_doc(i, window, cx)
+                            })),
+                    ),
+            );
+        }
         strip = strip.child(div().flex_1()).child(
             Button::new("toggle-split")
                 .ghost()
@@ -96,6 +158,7 @@ impl ProjectWindow {
         match self.tab {
             Tab::Claude => self.selected.clone().map(PaneView::Session),
             Tab::Terminal(i) => Some(PaneView::Terminal(i)),
+            Tab::Doc(i) => Some(PaneView::Doc(i)),
         }
     }
 
@@ -127,11 +190,19 @@ impl ProjectWindow {
                 .into_any_element(),
             Some(PaneView::Session(id)) => self.render_session_pane(&id, cx),
             Some(PaneView::Terminal(i)) => self.render_terminal_pane(i, cx),
+            Some(PaneView::Doc(i)) => match self.docs.get(i).and_then(|d| d.view.clone()) {
+                Some(view) => view.element(),
+                None => div().into_any_element(),
+            },
         };
         let header = is_split.then(|| {
             let title = match &self.split {
                 Some(PaneContent::Session { session_id }) => self.session_name(session_id),
                 Some(PaneContent::Terminal { index }) => format!("Terminal {}", index + 1),
+                Some(PaneContent::Doc { doc }) => self
+                    .doc_index(doc)
+                    .map(|i| self.docs[i].title(cx))
+                    .unwrap_or_default(),
                 None => String::new(),
             };
             div()
@@ -169,6 +240,24 @@ impl ProjectWindow {
             .children(header)
             .child(div().flex_1().min_h_0().relative().child(body))
             .drag_over::<DraggedSession>(move |style, _, _, _| style.bg(drop_color))
+            .drag_over::<DraggedDoc>(move |style, _, _, _| style.bg(drop_color))
+            .on_drop(cx.listener(move |this, dragged: &DraggedDoc, window, cx| {
+                let Some(i) = this.doc_index(&dragged.key) else {
+                    return;
+                };
+                if is_split {
+                    this.ensure_doc_view(i, window, cx);
+                    this.split = Some(PaneContent::Doc {
+                        doc: dragged.key.clone(),
+                    });
+                    if this.tab == Tab::Doc(i) {
+                        this.tab = Tab::Claude;
+                    }
+                    this.show_current(window, cx);
+                } else {
+                    this.show_doc(i, window, cx);
+                }
+            }))
             .on_drop(
                 cx.listener(move |this, dragged: &DraggedSession, window, cx| {
                     if is_split {
@@ -390,6 +479,10 @@ impl ProjectWindow {
         let split_view = match split {
             PaneContent::Session { session_id } => PaneView::Session(session_id),
             PaneContent::Terminal { index } => PaneView::Terminal(index),
+            PaneContent::Doc { doc } => match self.doc_index(&doc) {
+                Some(i) => PaneView::Doc(i),
+                None => return main,
+            },
         };
         let second = self.render_pane(Some(split_view), true, cx);
         let ratio = self.split_ratio;
@@ -414,7 +507,9 @@ impl ProjectWindow {
 impl Render for ProjectWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = Colors::of(cx);
-        let sidebar = self.render_sidebar(window, cx);
+        let sidebar_tabs = self.render_sidebar_tabs(cx);
+        let sidebar = self.render_sidebar_body(window, cx);
+        let quick_open = self.quick_open.clone();
         let tabs = self.render_tab_strip(cx);
         let banner = self.render_banner(cx);
         let right = self.render_right(cx);
@@ -480,6 +575,34 @@ impl Render for ProjectWindow {
                 }
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveAll, window, cx| this.save_all(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveFile, window, cx| {
+                // The editor handles ⌘S when it has focus; this is the menu.
+                if let Tab::Doc(i) = this.tab
+                    && let Some(crate::docs::DocView::Editor(e)) =
+                        this.docs.get(i).and_then(|d| d.view.clone())
+                {
+                    e.update(cx, |e, cx| e.save(window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| match this.tab {
+                Tab::Doc(i) => this.close_doc(i, window, cx),
+                Tab::Terminal(i) => this.close_terminal(i, window, cx),
+                Tab::Claude => {}
+            }))
+            .on_action(cx.listener(|this, _: &ShowSessions, window, cx| {
+                this.show_sidebar_tab(anveg_core::config::SidebarTab::Sessions, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {
+                this.show_sidebar_tab(anveg_core::config::SidebarTab::Files, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowGit, window, cx| {
+                this.show_sidebar_tab(anveg_core::config::SidebarTab::Git, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowGitHub, window, cx| {
+                this.show_sidebar_tab(anveg_core::config::SidebarTab::GitHub, window, cx)
+            }))
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(|this, _: &OpenSession1, w, cx| this.open_nth(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession2, w, cx| this.open_nth(1, w, cx)))
@@ -506,6 +629,7 @@ impl Render for ProjectWindow {
                                     .border_color(c.border)
                                     // Room for the traffic lights.
                                     .child(TitleBar::new())
+                                    .child(sidebar_tabs)
                                     .child(div().flex_1().min_h_0().child(sidebar)),
                             ),
                     )
@@ -535,6 +659,28 @@ impl Render for ProjectWindow {
                         .bg(c.background)
                         .text_sm()
                         .child(text),
+                )
+            })
+            .when_some(quick_open, |el, view| {
+                el.child(
+                    div()
+                        .id("quick-open-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .justify_center()
+                        .pt(px(60.))
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.close_quick_open(window, cx)),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .child(view),
+                        ),
                 )
             })
             .children(dialog)

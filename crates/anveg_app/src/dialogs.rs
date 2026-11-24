@@ -64,7 +64,8 @@ impl ProjectWindow {
         match &mut self.dialog {
             Some(DialogKind::NewWorktreeSession { error, .. })
             | Some(DialogKind::Rename { error, .. })
-            | Some(DialogKind::ProjectSettings { error, .. }) => {
+            | Some(DialogKind::ProjectSettings { error, .. })
+            | Some(DialogKind::Prompt { error, .. }) => {
                 *error = Some(SharedString::from(message.to_owned()))
             }
             _ => {}
@@ -159,6 +160,7 @@ impl ProjectWindow {
             Some(DialogKind::Rename { .. }) => self.commit_rename(window, cx),
             Some(DialogKind::ProjectSettings { .. }) => self.commit_project_settings(window, cx),
             Some(DialogKind::Message { .. }) => self.close_dialog(window, cx),
+            Some(DialogKind::Prompt { .. }) => self.confirm_prompt(None, window, cx),
             // Destructive or two-way choices need a click.
             _ => {}
         }
@@ -169,6 +171,9 @@ impl ProjectWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if matches!(self.dialog, Some(DialogKind::Prompt { .. })) {
+            return self.render_prompt(cx);
+        }
         let c = Colors::of(cx);
         let form = |cx: &mut Context<Self>| {
             div().flex().flex_col().gap_2().on_action(cx.listener(
@@ -425,6 +430,7 @@ impl ProjectWindow {
                 .description(body.clone())
                 .footer(Button::new("dlg-message-ok").primary().label("OK").on_click(close))
                 .into_any_element(),
+            DialogKind::Prompt { .. } => return None,
         };
         Some(el)
     }

@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anveg_core::config::{PaneContent, Project, RightTab, SavedBounds, WindowState};
+use anveg_core::config::{
+    PaneContent, Project, RightTab, SavedBounds, SidebarTab, WindowState,
+};
 use anveg_core::launcher::{self, ClaudeOptions, LaunchSpec, SessionStart};
 use anveg_core::session_index::{SessionIndex, SessionInfo, trash_session_files};
 use anveg_core::status::{self, SessionStatus, StatusEvent, TERMINAL_ID_ENV};
@@ -25,13 +27,20 @@ use gpui_kit::{
 };
 use uuid::Uuid;
 
+use crate::docs::DocTab;
+use crate::files_panel::FilesPanel;
+use crate::git_panel::{GitPanel, GitStore};
+use crate::github::GitHubPanel;
 use crate::model::{AppModel, ModelEvent, model};
+use crate::workspace::Prompt;
 
 /// Which tab the main pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Claude,
     Terminal(usize),
+    /// Phase 4: `docs[i]`.
+    Doc(usize),
 }
 
 /// How a terminal's program ended, for the overlay.
@@ -130,6 +139,12 @@ pub enum DialogKind {
         title: SharedString,
         body: SharedString,
     },
+    /// Phase 4: a question from a panel or document.
+    Prompt {
+        prompt: Prompt,
+        input: Option<Entity<InputState>>,
+        error: Option<SharedString>,
+    },
 }
 
 /// Dragging a session from the sidebar onto a pane (Phase 3).
@@ -172,12 +187,25 @@ pub struct ProjectWindow {
     pub split_state: Entity<ResizableState>,
     pub sidebar_width: f32,
     pub split_ratio: f32,
+    /// Phase 4: document tabs on the right.
+    pub docs: Vec<DocTab>,
+    /// Phase 4: the sidebar's tab and its panels (created when first shown).
+    pub sidebar_tab: SidebarTab,
+    pub files_panel: Option<Entity<FilesPanel>>,
+    pub git_panel: Option<Entity<GitPanel>>,
+    pub github_panel: Option<Entity<GitHubPanel>>,
+    pub git_store: Entity<GitStore>,
+    pub quick_open: Option<Entity<crate::files_panel::QuickOpen>>,
+    pub file_index: Option<crate::files_panel::FileIndex>,
+    pub saved_expanded: Vec<PathBuf>,
     bounds: Option<SavedBounds>,
     pub dialog: Option<DialogKind>,
     pub toast: Option<SharedString>,
     toast_task: Option<Task<()>>,
     pub context_menu: Entity<MenuState>,
     close_confirmed: bool,
+    /// The user chose to close or quit without saving.
+    pub unsaved_ok: bool,
     pending_resume: Vec<String>,
     memory_task: Option<Task<()>>,
     dialog_subscriptions: Vec<Subscription>,
@@ -251,8 +279,10 @@ impl ProjectWindow {
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.restart_memory_sampling(cx);
+                this.window_focused(window, cx);
             } else {
                 this.memory_task = None;
+                this.update_panel_visibility(window, cx);
             }
         }));
 
@@ -294,10 +324,25 @@ impl ProjectWindow {
         .detach();
 
         let terminal_count = saved.terminal_tabs.clamp(1, 12);
+        let docs: Vec<DocTab> = saved
+            .docs
+            .iter()
+            .filter(|k| k.restorable())
+            .cloned()
+            .map(DocTab::placeholder)
+            .collect();
         let tab = match saved.active_tab {
             RightTab::Claude => Tab::Claude,
             RightTab::Terminal => Tab::Terminal(0),
+            RightTab::Doc => match saved.active_doc {
+                Some(i) if i < docs.len() => Tab::Doc(i),
+                _ => Tab::Claude,
+            },
         };
+        let git_store = cx.new(|cx| GitStore::new(project_id, cx));
+        subscriptions.push(cx.observe(&git_store, |this, _, cx| {
+            this.on_git_store_changed(cx);
+        }));
         let mut this = Self {
             project_id,
             model,
@@ -323,6 +368,15 @@ impl ProjectWindow {
             last_terminal: 0,
             terminals: (0..terminal_count).map(|_| TermSlot::empty()).collect(),
             split: saved.split.clone(),
+            docs,
+            sidebar_tab: SidebarTab::Sessions,
+            files_panel: None,
+            git_panel: None,
+            github_panel: None,
+            git_store,
+            quick_open: None,
+            file_index: None,
+            saved_expanded: saved.expanded_folders.clone(),
             sidebar_state,
             split_state,
             sidebar_width: saved.sidebar_width.clamp(180.0, 520.0),
@@ -333,6 +387,7 @@ impl ProjectWindow {
             toast_task: None,
             context_menu,
             close_confirmed: false,
+            unsaved_ok: false,
             pending_resume: resume,
             memory_task: None,
             dialog_subscriptions: Vec::new(),
@@ -344,6 +399,17 @@ impl ProjectWindow {
         if let Tab::Terminal(i) = this.tab {
             this.show_terminal(i, window, cx);
         }
+        if let Tab::Doc(i) = this.tab {
+            this.show_doc(i, window, cx);
+        }
+        // The split pane may show a document too.
+        if let Some(PaneContent::Doc { doc }) = this.split.clone() {
+            match this.doc_index(&doc) {
+                Some(i) => this.ensure_doc_view(i, window, cx),
+                None => this.split = None,
+            }
+        }
+        this.show_sidebar_tab(saved.sidebar_tab, window, cx);
         this.try_pending_resume(window, cx);
         this.focus_main(window, cx);
         this
@@ -415,6 +481,7 @@ impl ProjectWindow {
             }
             ModelEvent::Hook(message) => self.on_hook(message, window, cx),
             ModelEvent::AttentionChanged => {}
+            ModelEvent::GhChanged => cx.notify(),
         }
     }
 
@@ -923,13 +990,17 @@ impl ProjectWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let TerminalViewEvent::OpenPath { link, cwd } = event {
+            self.open_link(link, cwd.clone(), window, cx);
+            return;
+        }
         let Some(key) = self.running_key_for_terminal(terminal_id) else {
             return;
         };
         let ended = match event {
             TerminalViewEvent::Exited(info) => Ended::Exited(info.clone()),
             TerminalViewEvent::Failed(message) => Ended::Failed(message.clone()),
-            TerminalViewEvent::TitleChanged(_) => return,
+            TerminalViewEvent::TitleChanged(_) | TerminalViewEvent::OpenPath { .. } => return,
         };
         self.mark_ended(&key, ended, window, cx);
     }
@@ -1080,8 +1151,17 @@ impl ProjectWindow {
             (Some(PaneContent::Session { session_id }), Tab::Claude) => {
                 self.selected.as_deref() == Some(session_id.as_str())
             }
+            (Some(PaneContent::Doc { doc }), Tab::Doc(i)) => {
+                self.docs.get(i).is_some_and(|d| &d.key == doc)
+            }
             _ => false,
         };
+        if matches!(self.tab, Tab::Doc(_)) {
+            if same {
+                self.split = None;
+            }
+            return;
+        }
         if !same {
             return;
         }
@@ -1095,6 +1175,7 @@ impl ProjectWindow {
                 .iter()
                 .position(|t| t.view.is_some())
                 .map(|index| PaneContent::Terminal { index }),
+            Tab::Doc(_) => None,
         };
     }
 
@@ -1131,6 +1212,15 @@ impl ProjectWindow {
                 .and_then(|id| self.running.get(id))
                 .map(|r| r.view.clone()),
             Tab::Terminal(i) => self.terminals.get(i).and_then(|t| t.view.clone()),
+            Tab::Doc(i) => {
+                if let Some(view) = self.docs.get(i).and_then(|d| d.view.clone()) {
+                    let handle = view.focus_handle(cx);
+                    window.focus(&handle, cx);
+                    window.on_next_frame(move |window, cx| window.focus(&handle, cx));
+                    return;
+                }
+                None
+            }
         };
         let handle = match view {
             Some(view) => Some(view.read(cx).focus_handle(cx)),
@@ -1163,7 +1253,7 @@ impl ProjectWindow {
                     self.show_terminal(i, window, cx);
                 }
             }
-            Tab::Terminal(_) => {
+            Tab::Terminal(_) | Tab::Doc(_) => {
                 self.tab = Tab::Claude;
                 self.show_current(window, cx);
             }
@@ -1221,7 +1311,7 @@ impl ProjectWindow {
                 }
             }
             Tab::Terminal(t) => Tab::Terminal(fix(t)),
-            Tab::Claude => Tab::Claude,
+            other => other,
         };
         self.last_terminal = fix(self.last_terminal).min(self.terminals.len().saturating_sub(1));
         self.show_current(window, cx);
@@ -1258,7 +1348,11 @@ impl ProjectWindow {
                 cx,
             )
         });
-        let events = cx.subscribe_in(&view, window, move |this, view, event, _, cx| {
+        let events = cx.subscribe_in(&view, window, move |this, view, event, window, cx| {
+            if let TerminalViewEvent::OpenPath { link, cwd } = event {
+                this.open_link(link, cwd.clone(), window, cx);
+                return;
+            }
             let Some(slot) = this
                 .terminals
                 .iter_mut()
@@ -1270,6 +1364,7 @@ impl ProjectWindow {
                 TerminalViewEvent::Exited(info) => slot.ended = Some(Ended::Exited(info.clone())),
                 TerminalViewEvent::Failed(m) => slot.ended = Some(Ended::Failed(m.clone())),
                 TerminalViewEvent::TitleChanged(title) => slot.title = title.clone(),
+                TerminalViewEvent::OpenPath { .. } => {}
             }
             cx.notify();
         });
@@ -1300,7 +1395,7 @@ impl ProjectWindow {
                     }
                     Some(PaneContent::Terminal { index: i })
                 }
-                Tab::Terminal(_) => self
+                Tab::Terminal(_) | Tab::Doc(_) => self
                     .selected
                     .clone()
                     .map(|session_id| PaneContent::Session { session_id }),
@@ -1489,10 +1584,13 @@ impl ProjectWindow {
 
     /// Whether the window may close now; when sessions are running (and
     /// the setting is on) this shows the confirmation and says no.
-    pub fn should_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.close_confirmed || self.model.read(cx).quitting {
             self.stop_all(cx);
             return true;
+        }
+        if self.ask_unsaved(false, window, cx) {
+            return false;
         }
         let names = self.running_session_names();
         if names.is_empty() || !self.model.read(cx).settings.confirm_on_close {
@@ -1790,6 +1888,11 @@ impl ProjectWindow {
         cx.notify();
     }
 
+    /// Keep a subscription for the window's lifetime (panels, documents).
+    pub fn push_long_subscription(&mut self, subscription: Subscription) {
+        self._subscriptions.push(subscription);
+    }
+
     /// Keep a dialog's input subscription until the dialog closes.
     pub fn push_subscription(&mut self, subscription: Subscription) {
         self.dialog_subscriptions.push(subscription);
@@ -1823,12 +1926,37 @@ impl ProjectWindow {
             active_tab: match self.tab {
                 Tab::Claude => RightTab::Claude,
                 Tab::Terminal(_) => RightTab::Terminal,
+                Tab::Doc(_) => RightTab::Doc,
             },
             sidebar_width: self.sidebar_width,
             running_sessions: running,
             terminal_tabs: self.terminals.len().max(1),
-            split: self.split.clone(),
+            split: self
+                .split
+                .clone()
+                .filter(|p| !matches!(p, PaneContent::Doc { doc } if !doc.restorable())),
             split_ratio: self.split_ratio,
+            sidebar_tab: self.sidebar_tab,
+            docs: self
+                .docs
+                .iter()
+                .filter(|d| d.key.restorable())
+                .map(|d| d.key.clone())
+                .collect(),
+            active_doc: match self.tab {
+                Tab::Doc(i) => self
+                    .docs
+                    .iter()
+                    .take(i + 1)
+                    .filter(|d| d.key.restorable())
+                    .count()
+                    .checked_sub(1),
+                _ => None,
+            },
+            expanded_folders: match &self.files_panel {
+                Some(p) => p.read(_cx).expanded_list(),
+                None => self.saved_expanded.clone(),
+            },
         }
     }
 

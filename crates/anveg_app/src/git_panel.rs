@@ -1,0 +1,1607 @@
+//! The Git tab (next phases, Phase 5): status, staging, commit, branches,
+//! remotes, history and stash, all through the `git` command-line tool.
+//!
+//! [`GitStore`] holds each repository's status for the window. It only
+//! watches files and runs `git` while a panel that needs it (Files, Git or
+//! GitHub) is visible; it never polls.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anveg_core::config::DocKey;
+use anveg_core::fswatch;
+use anveg_core::gh::{Run, RunState};
+use anveg_core::git::{
+    self, Branch, Change, Commit, DeleteError, DiffKind, NetworkOp, Section, Stash, StashOp,
+    Status, StatusEntry, Worktree,
+};
+use anveg_core::process::CancelToken;
+use anveg_core::time::{now_millis, relative};
+use futures::StreamExt as _;
+use gpui_cn::prelude::*;
+use gpui_cn::{Input, InputState, Switch, Textarea, TextareaState};
+use gpui_kit::{
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
+};
+use uuid::Uuid;
+
+use crate::actions::{Commit as CommitAction, GIT_PANEL_CONTEXT};
+use crate::model::model;
+use crate::ui::Colors;
+use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
+
+// ---------------------------------------------------------------------
+// The store
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct RepoState {
+    pub root: PathBuf,
+    pub git_dir: PathBuf,
+    pub status: Option<Status>,
+    pub worktrees: Vec<Worktree>,
+    pub error: Option<String>,
+    /// The latest CI run of the current branch (filled by the GitHub tab).
+    pub latest_run: Option<Run>,
+}
+
+pub struct GitStore {
+    project: Uuid,
+    pub repos: Vec<RepoState>,
+    pub discovered: bool,
+    active: bool,
+    refreshing: bool,
+    again: bool,
+    /// The last refresh, in ms (for the acceptance check in the log).
+    pub last_refresh_ms: u128,
+    watches: Vec<fswatch::Subscription>,
+    debounce: Option<Task<()>>,
+    _tasks: Vec<Task<()>>,
+}
+
+impl GitStore {
+    pub fn new(project: Uuid, _cx: &mut Context<Self>) -> Self {
+        Self {
+            project,
+            repos: Vec::new(),
+            discovered: false,
+            active: false,
+            refreshing: false,
+            again: false,
+            last_refresh_ms: 0,
+            watches: Vec::new(),
+            debounce: None,
+            _tasks: Vec::new(),
+        }
+    }
+
+    fn roots(&self, cx: &App) -> Vec<PathBuf> {
+        model(cx)
+            .read(cx)
+            .projects
+            .get(self.project)
+            .map(|p| std::iter::once(p.main_folder.clone()).chain(p.extra_folders.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// A panel that needs git became visible (or every one was hidden).
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            if self.discovered {
+                self.watch(cx);
+                self.refresh(cx);
+            } else {
+                self.discover(cx);
+            }
+        } else {
+            self.watches.clear();
+            self.debounce = None;
+        }
+    }
+
+    pub fn refresh_if_active(&mut self, cx: &mut Context<Self>) {
+        if self.active {
+            self.refresh(cx);
+        }
+    }
+
+    fn discover(&mut self, cx: &mut Context<Self>) {
+        let roots = self.roots(cx);
+        let git = model(cx).read(cx).git();
+        let task = cx.background_spawn(async move {
+            git.find_repos(&roots)
+                .into_iter()
+                .map(|root| {
+                    let git_dir = git.git_dir(&root).unwrap_or_else(|_| root.join(".git"));
+                    (root, git_dir)
+                })
+                .collect::<Vec<_>>()
+        });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.repos = found
+                    .into_iter()
+                    .map(|(root, git_dir)| RepoState {
+                        root,
+                        git_dir,
+                        status: None,
+                        worktrees: Vec::new(),
+                        error: None,
+                        latest_run: None,
+                    })
+                    .collect();
+                this.discovered = true;
+                if this.active {
+                    this.watch(cx);
+                    this.refresh(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Watch `.git` (index, HEAD, refs) and the working trees.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = model(cx).read(cx).fswatch.clone() else {
+            return;
+        };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+        let mut watches = Vec::new();
+        for repo in &self.repos {
+            let git_dir = repo.git_dir.clone();
+            let t = tx.clone();
+            let gd = git_dir.clone();
+            watches.push(service.subscribe(&repo.root, true, move |paths| {
+                if paths.iter().any(|p| matters(p, &gd)) {
+                    let _ = t.unbounded_send(());
+                }
+            }));
+            // A linked worktree's git dir lives outside its root.
+            if !git_dir.starts_with(&repo.root) {
+                let t = tx.clone();
+                let gd = git_dir.clone();
+                watches.push(service.subscribe(&git_dir, true, move |paths| {
+                    if paths.iter().any(|p| matters(p, &gd)) {
+                        let _ = t.unbounded_send(());
+                    }
+                }));
+            }
+        }
+        self.watches = watches;
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                if this.update(cx, |this, cx| this.schedule(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Refresh 300 ms after the last change of a burst (5.3).
+    fn schedule(&mut self, cx: &mut Context<Self>) {
+        if !self.active {
+            return;
+        }
+        self.debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let _ = this.update(cx, |this, cx| this.refresh(cx));
+        }));
+    }
+
+    /// Run `git status` (and `git worktree list`) for every repository.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.discovered {
+            self.discover(cx);
+            return;
+        }
+        if self.refreshing {
+            self.again = true;
+            return;
+        }
+        self.refreshing = true;
+        let git = model(cx).read(cx).git();
+        let roots: Vec<PathBuf> = self.repos.iter().map(|r| r.root.clone()).collect();
+        let task = cx.background_spawn(async move {
+            let started = std::time::Instant::now();
+            let results: Vec<(Result<Status, String>, Vec<Worktree>)> = roots
+                .iter()
+                .map(|root| {
+                    (
+                        git.status(root).map_err(|e| format!("{e:#}")),
+                        git.worktrees(root).unwrap_or_default(),
+                    )
+                })
+                .collect();
+            (results, started.elapsed().as_millis())
+        });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let (results, ms) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.refreshing = false;
+                this.last_refresh_ms = ms;
+                tracing::debug!(ms, "git status refreshed");
+                for (repo, (status, worktrees)) in this.repos.iter_mut().zip(results) {
+                    match status {
+                        Ok(s) => {
+                            repo.status = Some(s);
+                            repo.error = None;
+                        }
+                        Err(e) => repo.error = Some(e),
+                    }
+                    repo.worktrees = worktrees;
+                }
+                cx.notify();
+                if std::mem::take(&mut this.again) {
+                    this.refresh(cx);
+                }
+            });
+        }));
+    }
+
+    /// The change of a file, for the file tree's colours.
+    pub fn file_change(&self, path: &Path) -> Option<Change> {
+        let repo = self
+            .repos
+            .iter()
+            .filter(|r| path.starts_with(&r.root))
+            .max_by_key(|r| r.root.as_os_str().len())?;
+        let rel = path.strip_prefix(&repo.root).ok()?.to_string_lossy();
+        repo.status.as_ref()?.file_change(&rel)
+    }
+
+    /// Whether anything under the folder `dir` changed.
+    pub fn dir_changed(&self, dir: &Path) -> bool {
+        self.repos.iter().any(|repo| {
+            let Ok(rel) = dir.strip_prefix(&repo.root) else {
+                return false;
+            };
+            let prefix = format!("{}/", rel.to_string_lossy());
+            repo.status
+                .as_ref()
+                .is_some_and(|s| s.entries.iter().any(|e| e.path.starts_with(&prefix)))
+        })
+    }
+}
+
+/// Whether a changed path can change `git status`: working-tree files, and
+/// in the git dir only the index, HEAD and refs (not objects or logs).
+fn matters(path: &Path, git_dir: &Path) -> bool {
+    match path.strip_prefix(git_dir) {
+        Ok(rel) => {
+            let s = rel.to_string_lossy();
+            s == "index"
+                || s == "HEAD"
+                || s == "packed-refs"
+                || s == "MERGE_HEAD"
+                || s.starts_with("refs")
+        }
+        Err(_) => true,
+    }
+}
+
+// ---------------------------------------------------------------------
+// The panel
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Changes,
+    Branches,
+    History,
+    Stash,
+}
+
+struct NetworkJob {
+    label: String,
+    progress: String,
+    cancel: CancelToken,
+}
+
+pub struct GitPanel {
+    store: Entity<GitStore>,
+    repo: usize,
+    view: View,
+    summary: Entity<InputState>,
+    body: Entity<TextareaState>,
+    amend: bool,
+    busy: Option<String>,
+    network: Option<NetworkJob>,
+    branches: Vec<Branch>,
+    commits: Vec<Commit>,
+    stashes: Vec<Stash>,
+    focus: FocusHandle,
+    _tasks: Vec<Task<()>>,
+    _subs: Vec<gpui_kit::Subscription>,
+}
+
+impl EventEmitter<WorkspaceEvent> for GitPanel {}
+
+impl Focusable for GitPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl GitPanel {
+    pub fn new(store: Entity<GitStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let summary = cx.new(|cx| InputState::new(window, cx).placeholder("Summary"));
+        let body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Description")
+                .auto_grow(2, 8)
+        });
+        let subs = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&summary, |_, _, cx| cx.notify()),
+            // ⌘↩ inside the message fields (the inputs take it first).
+            cx.subscribe_in(&summary, window, |this, _, event, window, cx| {
+                if let gpui_cn::InputEvent::PressEnter { secondary: true, .. } = event {
+                    this.commit(false, window, cx);
+                }
+            }),
+            cx.subscribe_in(&body, window, |this, _, event, window, cx| {
+                if let gpui_cn::InputEvent::PressEnter { secondary: true, .. } = event {
+                    this.commit(false, window, cx);
+                }
+            }),
+        ];
+        Self {
+            store,
+            repo: 0,
+            view: View::Changes,
+            summary,
+            body,
+            amend: false,
+            busy: None,
+            network: None,
+            branches: Vec::new(),
+            commits: Vec::new(),
+            stashes: Vec::new(),
+            focus: cx.focus_handle(),
+            _tasks: Vec::new(),
+            _subs: subs,
+        }
+    }
+
+    fn repo_state(&self, cx: &App) -> Option<RepoState> {
+        self.store.read(cx).repos.get(self.repo).cloned()
+    }
+
+    fn repo_root(&self, cx: &App) -> Option<PathBuf> {
+        self.repo_state(cx).map(|r| r.root)
+    }
+
+    /// Run a git command in the background, then refresh.
+    fn run(
+        &mut self,
+        label: &str,
+        op: impl FnOnce(git::Git, PathBuf) -> anyhow::Result<()> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        self.busy = Some(label.to_owned());
+        cx.notify();
+        let task = cx.background_spawn(async move { op(git, root) });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                if let Err(e) = result {
+                    this.report(e, cx);
+                }
+                this.after_change(window, cx);
+            });
+        }));
+    }
+
+    fn report(&mut self, e: anyhow::Error, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+            "Git reported a problem",
+            format!("{e:#}"),
+        )));
+    }
+
+    fn after_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::GitChanged);
+        self.load_view(window, cx);
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Changes
+    // -----------------------------------------------------------------
+
+    fn open_diff(&self, entry: &StatusEntry, cx: &mut Context<Self>) {
+        let Some(repo) = self.repo_root(cx) else {
+            return;
+        };
+        let diff = match entry.section {
+            Section::Staged => DiffKind::Staged,
+            Section::Untracked => DiffKind::Untracked,
+            Section::Changes => DiffKind::Unstaged,
+            Section::Conflicts => {
+                cx.emit(WorkspaceEvent::OpenFile {
+                    path: repo.join(&entry.path),
+                    line: None,
+                    column: None,
+                });
+                return;
+            }
+        };
+        cx.emit(WorkspaceEvent::OpenDoc(DocKey::GitDiff {
+            repo,
+            path: entry.path.clone(),
+            diff,
+        }));
+    }
+
+    fn stage(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(
+            "Staging…",
+            move |git, root| {
+                let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+                git.stage(&root, &refs)
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn unstage(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(
+            "Unstaging…",
+            move |git, root| {
+                let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+                git.unstage(&root, &refs)
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn discard(&mut self, entry: StatusEntry, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let untracked = entry.section == Section::Untracked;
+        let body = if untracked {
+            format!("{} is moved to the Trash.", entry.path)
+        } else {
+            format!(
+                "Your changes to {} are thrown away. A copy of the current file goes to the Trash first, so you can get it back.",
+                entry.path
+            )
+        };
+        let prompt = Prompt::new("Discard changes?", body).cancel().button(
+            "Discard",
+            ButtonStyle::Destructive,
+            move |_, window, cx| {
+                let entry = entry.clone();
+                let _ = weak.update(cx, |this, cx| {
+                    this.run(
+                        "Discarding…",
+                        move |git, root| {
+                            let path = root.join(&entry.path);
+                            if entry.section == Section::Untracked {
+                                trash::delete(&path)?;
+                                Ok(())
+                            } else {
+                                git::copy_to_trash(&path)?;
+                                git.restore_worktree(&root, &[entry.path.as_str()])
+                            }
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                Ok(())
+            },
+        );
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn commit(&mut self, stage_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let summary = self.summary.read(cx).value().trim().to_owned();
+        let body = self.body.read(cx).value().trim().to_owned();
+        if summary.is_empty() {
+            cx.emit(WorkspaceEvent::Toast("Write a summary first.".into()));
+            return;
+        }
+        let message = if body.is_empty() {
+            summary
+        } else {
+            format!("{summary}\n\n{body}")
+        };
+        let amend = self.amend;
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        self.busy = Some("Committing…".into());
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            if stage_all {
+                git.stage_all(&root)?;
+            }
+            git.commit(&root, &message, amend)
+        });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                match result {
+                    Ok(_) => {
+                        this.summary.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.body.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.amend = false;
+                        cx.emit(WorkspaceEvent::Toast("Committed.".into()));
+                    }
+                    // Hook output (pre-commit and friends) is in the error.
+                    Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                        "The commit failed",
+                        format!("{e:#}"),
+                    ))),
+                }
+                this.after_change(window, cx);
+            });
+        }));
+    }
+
+    fn toggle_amend(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.amend = on;
+        if on && self.summary.read(cx).value().trim().is_empty() {
+            let Some(root) = self.repo_root(cx) else {
+                return;
+            };
+            let git = model(cx).read(cx).git();
+            let task = cx.background_spawn(async move { git.last_commit_message(&root) });
+            self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                if let Ok(message) = task.await {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        let (s, b) = message.split_once("\n\n").unwrap_or((&message, ""));
+                        let (s, b) = (s.to_owned(), b.to_owned());
+                        this.summary.update(cx, |i, cx| i.set_value(s, window, cx));
+                        this.body.update(cx, |i, cx| i.set_value(b, window, cx));
+                    });
+                }
+            }));
+        }
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Network (5.7)
+    // -----------------------------------------------------------------
+
+    fn network_op(&mut self, op: NetworkOp, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.repo_state(cx) else {
+            return;
+        };
+        if self.network.is_some() {
+            return;
+        }
+        let git = model(cx).read(cx).git();
+        let label = match &op {
+            NetworkOp::Fetch => "Fetching",
+            NetworkOp::Pull { .. } => "Pulling",
+            NetworkOp::Push { .. } => "Pushing",
+        }
+        .to_owned();
+        // The first push publishes the branch.
+        let op = match op {
+            NetworkOp::Push { .. } => {
+                let has_upstream = repo
+                    .status
+                    .as_ref()
+                    .is_some_and(|s| s.branch.upstream.is_some());
+                if has_upstream {
+                    NetworkOp::Push { set_upstream: None }
+                } else {
+                    let remotes = git.remotes(&repo.root).unwrap_or_default();
+                    let remote = remotes
+                        .iter()
+                        .find(|r| *r == "origin")
+                        .or(remotes.first())
+                        .cloned();
+                    match remote {
+                        Some(r) => NetworkOp::Push {
+                            set_upstream: Some(r),
+                        },
+                        None => {
+                            cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                                "No remote",
+                                "This repository has no remote to push to.",
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+            other => other,
+        };
+        let cancel = CancelToken::new();
+        self.network = Some(NetworkJob {
+            label: format!("{label}…"),
+            progress: String::new(),
+            cancel: cancel.clone(),
+        });
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+        let progress: anveg_core::process::Progress = Arc::new(move |line: &str| {
+            let _ = tx.unbounded_send(line.to_owned());
+        });
+        let root = repo.root.clone();
+        let task = cx.background_spawn(async move { git.network(&root, &op, &cancel, Some(progress)) });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            while let Some(line) = rx.next().await {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(job) = &mut this.network {
+                        job.progress = line;
+                        cx.notify();
+                    }
+                });
+            }
+        }));
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.network = None;
+                match result {
+                    Ok(_) => cx.emit(WorkspaceEvent::Toast(format!("{label} finished.").into())),
+                    Err(e) if anveg_core::process::is_cancelled(&e) => {
+                        cx.emit(WorkspaceEvent::Toast(format!("{label} cancelled.").into()))
+                    }
+                    Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                        format!("{label} failed"),
+                        format!("{e:#}"),
+                    ))),
+                }
+                this.after_change(window, cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Branches, history, stash
+    // -----------------------------------------------------------------
+
+    fn show_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = view;
+        self.load_view(window, cx);
+        cx.notify();
+    }
+
+    fn load_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        match self.view {
+            View::Changes => {}
+            View::Branches => {
+                let task = cx.background_spawn(async move { git.branches(&root) });
+                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                    let r = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.branches = r.unwrap_or_default();
+                        cx.notify();
+                    });
+                }));
+            }
+            View::History => {
+                let task = cx.background_spawn(async move { git.log(&root, 200) });
+                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                    let r = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.commits = r.unwrap_or_default();
+                        cx.notify();
+                    });
+                }));
+            }
+            View::Stash => {
+                let task = cx.background_spawn(async move { git.stashes(&root) });
+                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                    let r = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.stashes = r.unwrap_or_default();
+                        cx.notify();
+                    });
+                }));
+            }
+        }
+    }
+
+    fn checkout(&mut self, branch: Branch, window: &mut Window, cx: &mut Context<Self>) {
+        // git's own message explains what blocks a checkout.
+        self.run("Switching…", move |git, root| git.switch(&root, &branch), window, cx);
+    }
+
+    fn new_branch(&mut self, start: Option<String>, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let from = start.clone().unwrap_or_else(|| "the current branch".into());
+        let prompt = Prompt::new("New Branch", format!("Creates a branch from {from} and switches to it."))
+            .input("Branch name", "")
+            .cancel()
+            .button("Create", ButtonStyle::Primary, move |value, window, cx| {
+                let name = value.unwrap_or_default().trim().to_owned();
+                if name.is_empty() {
+                    return Err("Enter a name.".into());
+                }
+                let start = start.clone();
+                let ok = weak
+                    .update(cx, |this, cx| {
+                        let valid = this.repo_root(cx).is_some_and(|root| {
+                            model(cx).read(cx).git().check_branch_name(&root, &name)
+                        });
+                        if valid {
+                            this.run(
+                                "Creating branch…",
+                                move |git, root| git.create_branch(&root, &name, start.as_deref()),
+                                window,
+                                cx,
+                            );
+                        }
+                        valid
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    Ok(())
+                } else {
+                    Err("That isn't a valid branch name.".into())
+                }
+            });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn rename_branch(&mut self, branch: Branch, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let prompt = Prompt::new("Rename Branch", format!("Renames {}.", branch.name))
+            .input("New name", branch.name.clone())
+            .cancel()
+            .button("Rename", ButtonStyle::Primary, move |value, window, cx| {
+                let to = value.unwrap_or_default().trim().to_owned();
+                if to.is_empty() {
+                    return Err("Enter a name.".into());
+                }
+                let from = branch.name.clone();
+                let _ = weak.update(cx, |this, cx| {
+                    this.run(
+                        "Renaming…",
+                        move |git, root| git.rename_branch(&root, &from, &to),
+                        window,
+                        cx,
+                    )
+                });
+                Ok(())
+            });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn delete_branch(&mut self, branch: Branch, force: bool, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let (title, body, label) = if force {
+            (
+                format!("Force-delete {}?", branch.name),
+                "This branch has commits that are not merged anywhere. Deleting it loses them (unless you have them elsewhere).".to_owned(),
+                "Delete Anyway",
+            )
+        } else {
+            (
+                format!("Delete {}?", branch.name),
+                "The branch is deleted. Its commits stay if another branch has them.".to_owned(),
+                "Delete",
+            )
+        };
+        let prompt = Prompt::new(title, body).cancel().button(
+            label,
+            ButtonStyle::Destructive,
+            move |_, window, cx| {
+                let branch = branch.clone();
+                let _ = weak.update(cx, |this, cx| this.do_delete(branch, force, window, cx));
+                Ok(())
+            },
+        );
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn do_delete(&mut self, branch: Branch, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        let name = branch.name.clone();
+        let task = cx.background_spawn(async move { git.delete_branch(&root, &name, force) });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {}
+                    // Unmerged: ask again, explicitly (5.7).
+                    Err(e) if e.downcast_ref::<DeleteError>().is_some() => {
+                        this.delete_branch(branch, true, cx)
+                    }
+                    Err(e) => this.report(e, cx),
+                }
+                this.after_change(window, cx);
+            });
+        }));
+    }
+
+    fn stash_op(&mut self, stash: Stash, op: StashOp, cx: &mut Context<Self>, window: &mut Window) {
+        if op == StashOp::Drop {
+            let weak = cx.entity().downgrade();
+            let prompt = Prompt::new(
+                format!("Drop {}?", stash.name),
+                format!("“{}” is deleted.", stash.message),
+            )
+            .cancel()
+            .button("Drop", ButtonStyle::Destructive, move |_, window, cx| {
+                let name = stash.name.clone();
+                let _ = weak.update(cx, |this, cx| {
+                    this.run(
+                        "Dropping…",
+                        move |git, root| git.stash_op(&root, StashOp::Drop, &name),
+                        window,
+                        cx,
+                    )
+                });
+                Ok(())
+            });
+            cx.emit(WorkspaceEvent::Prompt(prompt));
+            return;
+        }
+        let name = stash.name.clone();
+        self.run("Applying stash…", move |git, root| git.stash_op(&root, op, &name), window, cx);
+    }
+
+    fn stash_push(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let prompt = Prompt::new(
+            "Stash Changes",
+            "Saves your changes (including untracked files) and cleans the working tree.",
+        )
+        .input("Message (optional)", "")
+        .cancel()
+        .button("Stash", ButtonStyle::Primary, move |value, window, cx| {
+            let message = value.unwrap_or_default();
+            let _ = weak.update(cx, |this, cx| {
+                this.run(
+                    "Stashing…",
+                    move |git, root| git.stash_push(&root, Some(&message)),
+                    window,
+                    cx,
+                )
+            });
+            Ok(())
+        });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    // -----------------------------------------------------------------
+    // Rendering
+    // -----------------------------------------------------------------
+
+    fn render_header(&mut self, repo: &RepoState, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let name = repo
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let branch = repo.status.as_ref().map(|s| &s.branch);
+        let head = branch
+            .and_then(|b| b.head.clone())
+            .unwrap_or_else(|| "(detached)".into());
+        let ab = branch
+            .map(|b| {
+                let mut parts = Vec::new();
+                if b.ahead > 0 {
+                    parts.push(format!("↑{}", b.ahead));
+                }
+                if b.behind > 0 {
+                    parts.push(format!("↓{}", b.behind));
+                }
+                if b.upstream.is_none() {
+                    parts.push("not published".into());
+                }
+                parts.join(" ")
+            })
+            .unwrap_or_default();
+        let ci = repo.latest_run.as_ref().map(|r| {
+            let (text, color) = match r.state() {
+                RunState::Success => ("CI ✓", gpui_kit::hsla(0.33, 0.6, 0.45, 1.0)),
+                RunState::Failure => ("CI ✗", c.destructive),
+                RunState::Pending => ("CI …", c.muted_foreground),
+                RunState::Cancelled | RunState::Skipped => ("CI –", c.muted_foreground),
+            };
+            div()
+                .text_xs()
+                .text_color(color)
+                .child(text)
+        });
+        let repos = self.store.read(cx).repos.len();
+        let busy = self.busy.is_some() || self.network.is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(c.border)
+            .when(repos > 1, |el| {
+                let mut row = div().flex().flex_wrap().gap_1();
+                for (i, r) in self.store.read(cx).repos.iter().enumerate() {
+                    let label = r
+                        .root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    row = row.child(
+                        Button::new(SharedString::from(format!("repo-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label(label)
+                            .toggled(i == self.repo)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.repo = i;
+                                this.load_view(window, cx);
+                                cx.notify();
+                            })),
+                    );
+                }
+                el.child(row)
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().min_w_0().truncate().child(format!("{name} · {head}")))
+                    .child(div().text_xs().text_color(c.muted_foreground).child(ab))
+                    .children(ci),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("git-fetch")
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Fetch")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.network_op(NetworkOp::Fetch, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("git-pull")
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Pull")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let mode = model(cx).read(cx).settings.pull_mode;
+                                this.network_op(NetworkOp::Pull { mode }, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("git-push")
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Push")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.network_op(NetworkOp::Push { set_upstream: None }, window, cx)
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("git-refresh")
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .icon(Icon::from(gpui_kit::assets::IconName::RefreshCw))
+                            .tooltip("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.store.update(cx, |s, cx| s.refresh(cx));
+                                this.load_view(window, cx);
+                            })),
+                    ),
+            )
+            .children(self.network.as_ref().map(|job| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{} {}", job.label, job.progress)),
+                    )
+                    .child(
+                        Button::new("net-cancel")
+                            .outline()
+                            .size(ButtonSize::Sm)
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(job) = &this.network {
+                                    job.cancel.cancel();
+                                }
+                                cx.notify();
+                            })),
+                    )
+            }))
+            .children(self.busy.clone().map(|b| {
+                div().text_xs().text_color(c.muted_foreground).child(b)
+            }))
+            .into_any_element()
+    }
+
+    fn render_views(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut row = div().flex().gap_0p5().px_1().py_0p5();
+        for (view, label) in [
+            (View::Changes, "Changes"),
+            (View::Branches, "Branches"),
+            (View::History, "History"),
+            (View::Stash, "Stash"),
+        ] {
+            row = row.child(
+                Button::new(SharedString::from(format!("gv-{label}")))
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .label(label)
+                    .toggled(self.view == view)
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_view(view, window, cx))),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn render_commit_box(&mut self, status: &Status, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let summary_len = self.summary.read(cx).value().chars().count();
+        let nothing_staged = !status.has_staged() && !self.amend;
+        let busy = self.busy.is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(c.border)
+            .child(Input::new(&self.summary))
+            .when(summary_len > 72, |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(c.destructive)
+                        .child(format!("Summary is {summary_len} characters; 72 or fewer reads best.")),
+                )
+            })
+            .child(Textarea::new(&self.body))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Switch::new("amend")
+                            .checked(self.amend)
+                            .on_change(cx.listener(|this, on: &bool, window, cx| {
+                                this.toggle_amend(*on, window, cx)
+                            })),
+                    )
+                    .child(div().text_xs().child("Amend"))
+                    .child(div().flex_1())
+                    .child(if nothing_staged && !status.is_clean() {
+                        Button::new("commit-all")
+                            .primary()
+                            .size(ButtonSize::Sm)
+                            .label("Stage All and Commit")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx)))
+                    } else {
+                        Button::new("commit")
+                            .primary()
+                            .size(ButtonSize::Sm)
+                            .label(if self.amend { "Amend (⌘↩)" } else { "Commit (⌘↩)" })
+                            .disabled(busy || nothing_staged)
+                            .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx)))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_changes(&mut self, repo: &RepoState, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let Some(status) = repo.status.clone() else {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child(repo.error.clone().unwrap_or_else(|| "Reading status…".into()))
+                .into_any_element();
+        };
+        let commit_box = self.render_commit_box(&status, cx);
+        let mut list = div().flex().flex_col();
+        for (section, label) in [
+            (Section::Conflicts, "Conflicts"),
+            (Section::Staged, "Staged"),
+            (Section::Changes, "Changes"),
+            (Section::Untracked, "Untracked"),
+        ] {
+            let entries: Vec<StatusEntry> = status.section(section).cloned().collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+            let header_button = match section {
+                Section::Staged => Some(
+                    Button::new(SharedString::from(format!("all-{label}")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .label("Unstage All")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.unstage(paths.clone(), window, cx)
+                        })),
+                ),
+                Section::Changes | Section::Untracked => Some(
+                    Button::new(SharedString::from(format!("all-{label}")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .label("Stage All")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.stage(paths.clone(), window, cx)
+                        })),
+                ),
+                Section::Conflicts => None,
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(div().flex_1().child(format!("{label} ({})", entries.len())))
+                    .children(header_button),
+            );
+            let total = entries.len();
+            for (i, entry) in entries.into_iter().take(500).enumerate() {
+                list = list.child(self.render_entry(section, i, entry, cx));
+            }
+            if total > 500 {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(format!("and {} more", total - 500)),
+                );
+            }
+        }
+        if status.is_clean() {
+            list = list.child(
+                div()
+                    .p_2()
+                    .text_sm()
+                    .text_color(c.muted_foreground)
+                    .child("No changes."),
+            );
+        }
+        let worktrees = (repo.worktrees.len() > 1).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .px_2()
+                .pt_2()
+                .text_xs()
+                .text_color(c.muted_foreground)
+                .child("Worktrees")
+                .children(repo.worktrees.iter().map(|w| {
+                    div().truncate().child(format!(
+                        "{} — {}",
+                        w.path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        w.branch.clone().unwrap_or_else(|| "(detached)".into())
+                    ))
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .child(commit_box)
+            .child(list)
+            .children(worktrees)
+            .into_any_element()
+    }
+
+    fn render_entry(
+        &mut self,
+        section: Section,
+        i: usize,
+        entry: StatusEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = Colors::of(cx);
+        let (dir, name) = match entry.path.rsplit_once('/') {
+            Some((d, n)) => (d.to_owned(), n.to_owned()),
+            None => (String::new(), entry.path.clone()),
+        };
+        let color = change_color(entry.change, &c);
+        let id = SharedString::from(format!("e-{section:?}-{i}"));
+        let open = entry.clone();
+        let mut buttons = div().flex().gap_0p5();
+        match section {
+            Section::Staged => {
+                let p = entry.path.clone();
+                buttons = buttons.child(
+                    Button::new(SharedString::from(format!("{id}-u")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .icon(Icon::from(gpui_kit::assets::IconName::Minus))
+                        .tooltip("Unstage")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.unstage(vec![p.clone()], window, cx)
+                        })),
+                );
+            }
+            Section::Changes | Section::Untracked | Section::Conflicts => {
+                let p = entry.path.clone();
+                let d = entry.clone();
+                if section != Section::Conflicts {
+                    buttons = buttons.child(
+                        Button::new(SharedString::from(format!("{id}-d")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .icon(Icon::from(gpui_kit::assets::IconName::Undo2))
+                            .tooltip("Discard…")
+                            .on_click(cx.listener(move |this, _, _, cx| this.discard(d.clone(), cx))),
+                    );
+                }
+                buttons = buttons.child(
+                    Button::new(SharedString::from(format!("{id}-s")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .icon(Icon::from(gpui_kit::assets::IconName::Plus))
+                        .tooltip(if section == Section::Conflicts {
+                            "Mark Resolved (stage)"
+                        } else {
+                            "Stage"
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.stage(vec![p.clone()], window, cx)
+                        })),
+                );
+            }
+        }
+        div()
+            .id(id)
+            .h(px(26.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|el| el.bg(c.accent.opacity(0.5)))
+            .child(div().w(px(14.)).text_xs().text_color(color).child(entry.change.letter()))
+            .child(div().text_sm().text_color(color).child(name))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(dir),
+            )
+            .child(buttons)
+            .on_click(cx.listener(move |this, _, _, cx| this.open_diff(&open, cx)))
+            .into_any_element()
+    }
+
+    fn render_branches(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let mut list = div().flex().flex_col().child(
+            div().flex().px_2().py_1().child(
+                Button::new("new-branch")
+                    .outline()
+                    .size(ButtonSize::Sm)
+                    .label("New Branch…")
+                    .on_click(cx.listener(|this, _, _, cx| this.new_branch(None, cx))),
+            ),
+        );
+        let now = now_millis();
+        for remote in [false, true] {
+            let branches: Vec<Branch> = self
+                .branches
+                .iter()
+                .filter(|b| b.remote == remote)
+                .cloned()
+                .collect();
+            if branches.is_empty() {
+                continue;
+            }
+            list = list.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(if remote { "Remote" } else { "Local" }),
+            );
+            for (i, b) in branches.into_iter().enumerate() {
+                let id = SharedString::from(format!("br-{remote}-{i}"));
+                let checkout = b.clone();
+                let from = b.clone();
+                let rename = b.clone();
+                let delete = b.clone();
+                let mut actions = div().flex().gap_0p5().child(
+                    Button::new(SharedString::from(format!("{id}-new")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .label("Branch from")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.new_branch(Some(from.name.clone()), cx)
+                        })),
+                );
+                if !remote {
+                    actions = actions
+                        .child(
+                            Button::new(SharedString::from(format!("{id}-ren")))
+                                .ghost()
+                                .size(ButtonSize::Sm)
+                                .label("Rename")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.rename_branch(rename.clone(), cx)
+                                })),
+                        )
+                        .when(!b.current, |el| {
+                            el.child(
+                                Button::new(SharedString::from(format!("{id}-del")))
+                                    .ghost()
+                                    .size(ButtonSize::Sm)
+                                    .label("Delete")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.delete_branch(delete.clone(), false, cx)
+                                    })),
+                            )
+                        });
+                }
+                list = list.child(
+                    div()
+                        .id(id)
+                        .px_2()
+                        .py_0p5()
+                        .flex()
+                        .flex_col()
+                        .cursor_pointer()
+                        .hover(|el| el.bg(c.accent.opacity(0.5)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_sm()
+                                .child(if b.current { "● " } else { "" })
+                                .child(div().flex_1().min_w_0().truncate().child(b.name.clone()))
+                                .child(actions),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .truncate()
+                                .child(format!("{} · {}", relative(b.time * 1000, now), b.subject)),
+                        )
+                        .when(!b.current, |el| {
+                            el.on_click(cx.listener(move |this, _, window, cx| {
+                                this.checkout(checkout.clone(), window, cx)
+                            }))
+                        }),
+                );
+            }
+        }
+        list.into_any_element()
+    }
+
+    fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let now = now_millis();
+        let root = self.repo_root(cx);
+        div()
+            .flex()
+            .flex_col()
+            .children(self.commits.iter().enumerate().map(|(i, commit)| {
+                let key = root.clone().map(|repo| DocKey::Commit {
+                    repo,
+                    sha: commit.sha.clone(),
+                    title: commit.subject.clone(),
+                });
+                div()
+                    .id(SharedString::from(format!("c-{i}")))
+                    .px_2()
+                    .py_0p5()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(c.accent.opacity(0.5)))
+                    .child(div().text_sm().truncate().child(commit.subject.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child(format!(
+                                "{} · {} · {}",
+                                commit.short,
+                                commit.author,
+                                relative(commit.time * 1000, now)
+                            )),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if let Some(key) = key.clone() {
+                            cx.emit(WorkspaceEvent::OpenDoc(key));
+                        }
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    fn render_stash(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let now = now_millis();
+        let mut list = div().flex().flex_col().child(
+            div().px_2().py_1().child(
+                Button::new("stash-push")
+                    .outline()
+                    .size(ButtonSize::Sm)
+                    .label("Stash Changes…")
+                    .on_click(cx.listener(|this, _, _, cx| this.stash_push(cx))),
+            ),
+        );
+        if self.stashes.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .text_sm()
+                    .text_color(c.muted_foreground)
+                    .child("No stashes."),
+            );
+        }
+        for (i, s) in self.stashes.clone().into_iter().enumerate() {
+            let (a, p, d) = (s.clone(), s.clone(), s.clone());
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().truncate().child(s.message.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .child(format!("{} · {}", s.name, relative(s.time * 1000, now))),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("st-a-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Apply")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.stash_op(a.clone(), StashOp::Apply, cx, window)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("st-p-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Pop")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.stash_op(p.clone(), StashOp::Pop, cx, window)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("st-d-{i}")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .label("Drop")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.stash_op(d.clone(), StashOp::Drop, cx, window)
+                            })),
+                    ),
+            );
+        }
+        list.into_any_element()
+    }
+}
+
+pub fn change_color(change: Change, c: &Colors) -> gpui_kit::Hsla {
+    match change {
+        Change::Added | Change::Untracked => gpui_kit::hsla(0.33, 0.55, 0.45, 1.0),
+        Change::Deleted | Change::Conflicted => c.destructive,
+        Change::Modified | Change::TypeChanged => gpui_kit::hsla(0.11, 0.8, 0.5, 1.0),
+        Change::Renamed | Change::Copied => gpui_kit::hsla(0.58, 0.6, 0.55, 1.0),
+    }
+}
+
+impl Render for GitPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = Colors::of(cx);
+        let store = self.store.read(cx);
+        if !store.discovered {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child("Looking for git repositories…")
+                .into_any_element();
+        }
+        if store.repos.is_empty() {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child("None of this project's folders is in a git repository.")
+                .into_any_element();
+        }
+        self.repo = self.repo.min(store.repos.len() - 1);
+        let Some(repo) = self.repo_state(cx) else {
+            return div().into_any_element();
+        };
+        let header = self.render_header(&repo, cx);
+        let views = self.render_views(cx);
+        let body = match self.view {
+            View::Changes => self.render_changes(&repo, cx),
+            View::Branches => self.render_branches(cx),
+            View::History => self.render_history(cx),
+            View::Stash => self.render_stash(cx),
+        };
+        div()
+            .id("git-panel")
+            .key_context(GIT_PANEL_CONTEXT)
+            .track_focus(&self.focus)
+            .size_full()
+            .flex()
+            .flex_col()
+            .on_action(cx.listener(|this, _: &CommitAction, window, cx| {
+                this.commit(false, window, cx)
+            }))
+            .child(header)
+            .child(views)
+            .child(
+                div()
+                    .id("git-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .into_any_element()
+    }
+}

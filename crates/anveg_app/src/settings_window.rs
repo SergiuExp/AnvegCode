@@ -24,7 +24,20 @@ enum Field {
     FontSize,
     Scrollback,
     IdleMinutes,
+    /// Phase 4: a language server command.
+    Lsp(&'static str),
+    /// Phase 4: extra file types ("tpl=html, jsonl=json").
+    FileTypes,
 }
+
+/// The languages with a server command in Settings ▸ Editor.
+const LSP_LANGUAGES: [(&str, &str); 5] = [
+    ("rust", "Rust"),
+    ("typescript", "TypeScript / TSX"),
+    ("javascript", "JavaScript"),
+    ("python", "Python"),
+    ("go", "Go"),
+];
 
 pub struct SettingsWindow {
     model: Entity<AppModel>,
@@ -78,6 +91,14 @@ fn field_value(field: Field, s: &Settings) -> String {
         Field::FontSize => format!("{}", s.terminal.font_size),
         Field::Scrollback => s.terminal.scrollback_lines.to_string(),
         Field::IdleMinutes => s.idle_stop_minutes.to_string(),
+        Field::Lsp(lang) => s.lsp_servers.get(lang).cloned().unwrap_or_default(),
+        Field::FileTypes => s
+            .editor
+            .file_types
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -87,18 +108,24 @@ impl SettingsWindow {
         let settings = model.read(cx).settings.clone();
         let mut fields = Vec::new();
         let mut subscriptions = vec![cx.observe(&model, |_, _, cx| cx.notify())];
-        for field in [
+        let all = [
             Field::ClaudePath,
             Field::DefaultFlags,
             Field::FontFamily,
             Field::FontSize,
             Field::Scrollback,
             Field::IdleMinutes,
-        ] {
+            Field::FileTypes,
+        ]
+        .into_iter()
+        .chain(LSP_LANGUAGES.iter().map(|(l, _)| Field::Lsp(l)));
+        for field in all {
             let value = field_value(field, &settings);
             let placeholder = match field {
                 Field::ClaudePath => "Auto-detect on PATH",
                 Field::DefaultFlags => "e.g. --permission-mode plan",
+                Field::Lsp(_) => "Empty turns it off",
+                Field::FileTypes => "e.g. tpl=html, jsonl=json",
                 _ => "",
             };
             let input = cx.new(|cx| {
@@ -177,6 +204,33 @@ impl SettingsWindow {
                 }
                 _ => Err("Minutes must be a whole number (0 turns it off).".into()),
             },
+            Field::Lsp(lang) => shell_words::split(&text)
+                .map(|_| {
+                    next.lsp_servers.insert(lang.to_owned(), text.clone());
+                })
+                .map_err(|e| format!("Language server command: {e}")),
+            Field::FileTypes => {
+                let mut map = std::collections::BTreeMap::new();
+                let mut bad = None;
+                for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    match part.split_once('=') {
+                        Some((k, v)) if !k.trim().is_empty() && !v.trim().is_empty() => {
+                            map.insert(
+                                k.trim().trim_start_matches('.').to_lowercase(),
+                                v.trim().to_lowercase(),
+                            );
+                        }
+                        _ => bad = Some(part.to_owned()),
+                    }
+                }
+                match bad {
+                    Some(part) => Err(format!("File types: “{part}” should look like ext=language.")),
+                    None => {
+                        next.editor.file_types = map;
+                        Ok(())
+                    }
+                }
+            }
         };
         match result {
             Ok(()) => {
@@ -349,6 +403,63 @@ impl Render for SettingsWindow {
                         "Option key acts as Meta",
                         None,
                         self.switch("s-meta", s.terminal.option_as_meta, |s, v| s.terminal.option_as_meta = v, cx),
+                        cx,
+                    ))
+                    .child(section("Editor"))
+                    .child(self.row(
+                        "Soft wrap",
+                        Some("For files opened afterwards; each editor also has a Wrap toggle."),
+                        self.switch("s-wrap", s.editor.soft_wrap, |s, v| s.editor.soft_wrap = v, cx),
+                        cx,
+                    ))
+                    .child(self.row(
+                        "Format on save",
+                        Some("Uses the file's language server."),
+                        self.switch("s-fmt", s.editor.format_on_save, |s, v| s.editor.format_on_save = v, cx),
+                        cx,
+                    ))
+                    .child(self.row(
+                        "Extra file types",
+                        Some("Highlight these extensions as another language."),
+                        self.text(Field::FileTypes),
+                        cx,
+                    ))
+                    .child(section("Language servers"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child("Found on your login shell's PATH. A server starts when you open a file in its language and stops 10 minutes after the last one closes."),
+                    )
+                    .children(LSP_LANGUAGES.iter().map(|(lang, label)| {
+                        self.row(label, None, self.text(Field::Lsp(lang)), cx)
+                    }))
+                    .child(section("Git"))
+                    .child(self.row(
+                        "Pull",
+                        Some("How Pull combines remote changes with yours."),
+                        {
+                            let mut row = div().flex().gap_1();
+                            for (mode, label) in [
+                                (anveg_core::git::PullMode::FastForwardOnly, "Fast-forward only"),
+                                (anveg_core::git::PullMode::Merge, "Merge"),
+                                (anveg_core::git::PullMode::Rebase, "Rebase"),
+                            ] {
+                                row = row.child(
+                                    gpui_cn::Button::new(gpui_kit::SharedString::from(format!("pull-{label}")))
+                                        .ghost()
+                                        .size(gpui_cn::ButtonSize::Sm)
+                                        .label(label)
+                                        .toggled(s.pull_mode == mode)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.model.update(cx, |m, cx| {
+                                                m.update_settings(cx, |s| s.pull_mode = mode)
+                                            })
+                                        })),
+                                );
+                            }
+                            row.into_any_element()
+                        },
                         cx,
                     ))
                     .child(section("Status and resources"))

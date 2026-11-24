@@ -39,6 +39,21 @@ actions!(
         OpenSession7,
         OpenSession8,
         OpenSession9,
+        // Phase 4
+        QuickOpen,
+        SaveFile,
+        SaveAll,
+        GoToLine,
+        FormatDocument,
+        AskClaudeAboutSelection,
+        ToggleSoftWrap,
+        CloseTab,
+        ShowSessions,
+        ShowFiles,
+        ShowGit,
+        ShowGitHub,
+        // Phase 5
+        Commit,
     ]
 );
 
@@ -51,6 +66,9 @@ pub struct OpenRecent {
 
 /// The key context of the session list, where ⌫ deletes.
 pub const SESSION_LIST_CONTEXT: &str = "SessionList";
+
+/// The key context of the Git panel, where ⌘↩ commits.
+pub const GIT_PANEL_CONTEXT: &str = "GitPanel";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -76,6 +94,23 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-7", OpenSession7, None),
         KeyBinding::new("cmd-8", OpenSession8, None),
         KeyBinding::new("cmd-9", OpenSession9, None),
+        KeyBinding::new("cmd-p", QuickOpen, None),
+        KeyBinding::new("cmd-alt-s", SaveAll, None),
+        KeyBinding::new("cmd-shift-w", CloseTab, None),
+        KeyBinding::new("cmd-shift-1", ShowSessions, None),
+        KeyBinding::new("cmd-shift-2", ShowFiles, None),
+        KeyBinding::new("cmd-shift-3", ShowGit, None),
+        KeyBinding::new("cmd-shift-4", ShowGitHub, None),
+        KeyBinding::new("cmd-s", SaveFile, Some(crate::editor_view::EDITOR_CONTEXT)),
+        KeyBinding::new("cmd-l", GoToLine, Some(crate::editor_view::EDITOR_CONTEXT)),
+        KeyBinding::new("alt-shift-f", FormatDocument, Some(crate::editor_view::EDITOR_CONTEXT)),
+        KeyBinding::new(
+            "cmd-shift-l",
+            AskClaudeAboutSelection,
+            Some(crate::editor_view::EDITOR_CONTEXT),
+        ),
+        KeyBinding::new("alt-z", ToggleSoftWrap, Some(crate::editor_view::EDITOR_CONTEXT)),
+        KeyBinding::new("cmd-enter", Commit, Some(GIT_PANEL_CONTEXT)),
         KeyBinding::new("backspace", DeleteSession, Some(SESSION_LIST_CONTEXT)),
         KeyBinding::new("cmd-backspace", DeleteSession, Some(SESSION_LIST_CONTEXT)),
     ]);

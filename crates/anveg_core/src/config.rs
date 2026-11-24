@@ -70,7 +70,7 @@ pub struct Settings {
 }
 
 /// Editor preferences (Settings ▸ Editor).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorPrefs {
     pub soft_wrap: bool,
@@ -78,16 +78,6 @@ pub struct EditorPrefs {
     /// Extra file types: extension (without the dot) or file name → the
     /// language to highlight it as. Added to the built-in list.
     pub file_types: BTreeMap<String, String>,
-}
-
-impl Default for EditorPrefs {
-    fn default() -> Self {
-        Self {
-            soft_wrap: false,
-            format_on_save: false,
-            file_types: BTreeMap::new(),
-        }
-    }
 }
 
 /// The default language servers (next phases, 4.3).
@@ -319,6 +309,10 @@ pub enum DocKey {
         repo: PathBuf,
         id: u64,
         title: String,
+    },
+    /// The form for a new pull request from the current branch.
+    CreatePullRequest {
+        repo: PathBuf,
     },
     /// The unsaved buffer of `path` against the file on disk. Not saved
     /// in `state.json` (the buffer is gone after a restart).
