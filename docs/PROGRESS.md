@@ -706,3 +706,24 @@ The owner found the selected session hard to see, especially in dark mode: the r
 - [ ] Add "Run" with New terminal each time: each click opens a new tab.
 - [ ] Turn off Show in toolbar: the button goes; the shortcut still works.
 - [ ] Two projects with the same shortcut: each window runs its own command.
+
+---
+
+## Change: full-screen windows come back full screen, as tabs (2026-11-24)
+
+The owner reported that windows closed in full screen reopened as screen-sized windows. `state.json` only knew "maximized", which a full-screen window was saved as.
+
+**Done**
+- `SavedBounds.fullscreen` (old files: `false`). A full-screen window saves its windowed frame plus `fullscreen: true`, and reopens with `WindowBounds::Fullscreen` (GPUI enters full screen right after the window opens).
+- Project windows share a macOS **tab group** (`tabbingIdentifier` `dev.anveg.code.project`). With System Settings ▸ Desktop & Dock ▸ *Prefer tabs when opening documents* on "In Full Screen" (the default) or "Always", a project opened while the app is full screen (⌘O, Open Recent, the welcome window) becomes a tab of the full-screen window.
+- **Restore on launch:** windowed windows open first. The first full-screen window opens full screen; once it is (up to 4 s), the other full-screen windows open at their frames and macOS adds them as its tabs, which puts them in full screen too. If tabs are set to "Never" (`AppleWindowTabbingMode` = `manual`), each full-screen window gets its own space instead. If the first never reaches full screen, the rest open full screen on their own.
+- Tab order after a restart follows the order the windows were opened, not necessarily the order of the tabs when you quit.
+
+**Not verified:** none of this can run on Linux (no full screen or window tabs under Xvfb). Checked: it type-checks for macOS, and windowed restore still works on Linux.
+
+**Manual checks (Mac)**
+- [ ] Put a project window in full screen, quit, relaunch: it opens in full screen.
+- [ ] With two project windows tabbed in full screen, quit and relaunch: one full-screen window with both tabs.
+- [ ] While in full screen, ⌘O another folder: it opens as a new tab.
+- [ ] System Settings ▸ Prefer tabs: Never, two full-screen windows, relaunch: two full-screen spaces.
+- [ ] A normal (windowed) window still reopens at its size and place.

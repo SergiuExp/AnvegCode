@@ -33,6 +33,20 @@ pub fn set_badge_count(count: usize) {
     });
 }
 
+/// System Settings ▸ Desktop & Dock ▸ "Prefer tabs when opening documents".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum TabbingMode {
+    Always,
+    /// The default: new windows become tabs while the app is full screen.
+    InFullScreen,
+    Never,
+}
+
+pub fn tabbing_mode() -> TabbingMode {
+    imp::tabbing_mode()
+}
+
 /// Post a notification. Clicking it focuses the project's window and
 /// selects the session.
 pub fn notify(title: &str, body: &str, project_id: Uuid, session_id: &str) {
@@ -177,6 +191,20 @@ mod imp {
         center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 
+    /// `AppleWindowTabbingMode` in the global defaults: "always",
+    /// "fullscreen" (also when unset) or "manual".
+    pub fn tabbing_mode() -> super::TabbingMode {
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        let value = defaults
+            .stringForKey(&NSString::from_str("AppleWindowTabbingMode"))
+            .map(|s| s.to_string());
+        match value.as_deref() {
+            Some("always") => super::TabbingMode::Always,
+            Some("manual") => super::TabbingMode::Never,
+            _ => super::TabbingMode::InFullScreen,
+        }
+    }
+
     pub fn set_badge(label: Option<String>) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -193,6 +221,11 @@ mod imp {
     use futures::channel::mpsc::UnboundedSender;
 
     pub fn init(_tx: UnboundedSender<String>) {}
+
+    /// No native window tabs on other platforms.
+    pub fn tabbing_mode() -> super::TabbingMode {
+        super::TabbingMode::Never
+    }
 
     pub fn notify(title: &str, body: &str, _identifier: &str) {
         tracing::info!(title, body, "notification");

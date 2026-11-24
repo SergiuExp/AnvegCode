@@ -379,6 +379,9 @@ pub struct SavedBounds {
     pub height: f32,
     #[serde(default)]
     pub maximized: bool,
+    /// macOS full screen (the frame is the size to return to).
+    #[serde(default)]
+    pub fullscreen: bool,
 }
 
 /// What one pane shows (Phase 3 split view).
@@ -615,6 +618,7 @@ mod tests {
             width: 800.0,
             height: 600.0,
             maximized: false,
+            fullscreen: true,
         });
         w.selected_session = Some("abc".into());
         w.active_tab = RightTab::Terminal;

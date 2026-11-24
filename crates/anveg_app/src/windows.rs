@@ -13,11 +13,36 @@ use uuid::Uuid;
 use crate::model::{OpenWindow, model};
 use crate::project_window::ProjectWindow;
 
+/// Project windows share this macOS tab group, so a window opened while
+/// the app is full screen becomes a tab of it (System Settings ▸ Desktop &
+/// Dock ▸ Prefer tabs).
+pub const TABBING_ID: &str = "dev.anveg.code.project";
+
+/// How to open a restored window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restore {
+    /// As it was saved (windowed, maximized or full screen).
+    AsSaved,
+    /// At its saved frame but not full screen: macOS adds it as a tab of
+    /// the full-screen window in front, which makes it full screen too.
+    AsTab,
+}
+
 /// Open (or focus) the window for a project.
 pub fn open_project(
     project_id: Uuid,
     saved: Option<WindowState>,
     resume: Vec<String>,
+    cx: &mut App,
+) {
+    open_project_with(project_id, saved, resume, Restore::AsSaved, cx);
+}
+
+fn open_project_with(
+    project_id: Uuid,
+    saved: Option<WindowState>,
+    resume: Vec<String>,
+    how: Restore,
     cx: &mut App,
 ) {
     let model = model(cx);
@@ -35,7 +60,9 @@ pub fn open_project(
     let bounds = match saved.as_ref().and_then(|s| s.bounds) {
         Some(b) => {
             let rect = Bounds::new(point(px(b.x), px(b.y)), size(px(b.width), px(b.height)));
-            if b.maximized {
+            if b.fullscreen && how == Restore::AsSaved {
+                WindowBounds::Fullscreen(rect)
+            } else if b.maximized {
                 WindowBounds::Maximized(rect)
             } else {
                 WindowBounds::Windowed(rect)
@@ -49,6 +76,7 @@ pub fn open_project(
             width: px(640.),
             height: px(400.),
         }),
+        tabbing_identifier: Some(TABBING_ID.to_owned()),
         ..TitleBar::window_options(cx)
     };
     let saved_for_view = saved.clone();
@@ -113,6 +141,11 @@ pub fn prompt_open_folder(cx: &mut App) {
 }
 
 /// Reopen the windows saved in `state.json`. Returns how many opened.
+///
+/// Windows that were full screen come back full screen. When there are
+/// several and macOS prefers tabs in full screen (the default), the first
+/// opens full screen and the others join it as tabs once it is there, as
+/// they were; with tabs turned off, each gets its own full-screen space.
 pub fn restore(cx: &mut App) -> usize {
     let model = model(cx);
     let (state, resume_on_launch) = {
@@ -122,19 +155,84 @@ pub fn restore(cx: &mut App) -> usize {
             m.settings.resume_on_launch,
         )
     };
-    let mut opened = 0;
-    for window in state.windows {
-        if model.read(cx).projects.get(window.project_id).is_none() {
-            continue;
-        }
-        let resume = if resume_on_launch {
-            window.running_sessions.clone()
+    let windows: Vec<WindowState> = state
+        .windows
+        .into_iter()
+        .filter(|w| model.read(cx).projects.get(w.project_id).is_some())
+        .collect();
+    let opened = windows.len();
+    let resume_for = |w: &WindowState| {
+        if resume_on_launch {
+            w.running_sessions.clone()
         } else {
             Vec::new()
-        };
-        open_project(window.project_id, Some(window), resume, cx);
-        opened += 1;
+        }
+    };
+    let (full, other): (Vec<WindowState>, Vec<WindowState>) = windows
+        .into_iter()
+        .partition(|w| w.bounds.is_some_and(|b| b.fullscreen));
+    // Windowed ones first, so the full-screen window ends up in front.
+    for w in other {
+        let resume = resume_for(&w);
+        open_project(w.project_id, Some(w), resume, cx);
     }
+    let tabs = crate::platform::tabbing_mode() != crate::platform::TabbingMode::Never;
+    let mut full = full.into_iter();
+    let Some(first) = full.next() else {
+        return opened;
+    };
+    let rest: Vec<(WindowState, Vec<String>)> = full
+        .map(|w| {
+            let resume = resume_for(&w);
+            (w, resume)
+        })
+        .collect();
+    let first_id = first.project_id;
+    let resume = resume_for(&first);
+    open_project(first.project_id, Some(first), resume, cx);
+    if rest.is_empty() {
+        return opened;
+    }
+    if !tabs {
+        for (w, resume) in rest {
+            open_project(w.project_id, Some(w), resume, cx);
+        }
+        return opened;
+    }
+    // Wait for the first window to finish entering full screen (macOS
+    // animates it), then add the others: macOS makes them its tabs.
+    cx.spawn(async move |cx| {
+        let mut ready = false;
+        for _ in 0..40 {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            ready = cx.update(|cx| {
+                let handle = crate::model::model(cx)
+                    .read(cx)
+                    .window_for(first_id)
+                    .map(|w| w.handle);
+                handle.is_some_and(|h| {
+                    h.update(cx, |_, window, _| window.is_fullscreen())
+                        .unwrap_or(false)
+                })
+            });
+            if ready {
+                break;
+            }
+        }
+        cx.update(|cx| {
+            let how = if ready {
+                Restore::AsTab
+            } else {
+                Restore::AsSaved
+            };
+            for (w, resume) in rest {
+                open_project_with(w.project_id, Some(w), resume, how, cx);
+            }
+        });
+    })
+    .detach();
     opened
 }
 

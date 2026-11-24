@@ -2089,9 +2089,10 @@ fn send_rename(view: Entity<TerminalView>, name: String, cx: &mut App) {
 }
 
 fn saved_bounds(window: &Window) -> SavedBounds {
-    let (bounds, maximized) = match window.window_bounds() {
-        WindowBounds::Windowed(b) => (b, false),
-        WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+    let (bounds, maximized, fullscreen) = match window.window_bounds() {
+        WindowBounds::Windowed(b) => (b, false, false),
+        WindowBounds::Maximized(b) => (b, true, false),
+        WindowBounds::Fullscreen(b) => (b, false, true),
     };
     SavedBounds {
         x: f32::from(bounds.origin.x),
@@ -2099,5 +2100,6 @@ fn saved_bounds(window: &Window) -> SavedBounds {
         width: f32::from(bounds.size.width).max(px(400.).into()),
         height: f32::from(bounds.size.height).max(px(300.).into()),
         maximized,
+        fullscreen,
     }
 }
