@@ -727,3 +727,18 @@ The owner reported that windows closed in full screen reopened as screen-sized w
 - [ ] While in full screen, ⌘O another folder: it opens as a new tab.
 - [ ] System Settings ▸ Prefer tabs: Never, two full-screen windows, relaunch: two full-screen spaces.
 - [ ] A normal (windowed) window still reopens at its size and place.
+
+---
+
+## App icon (2026-11-24)
+
+The owner picked option D, "Session Orbit", from six concepts on a Claude Design canvas: a prompt in the centre with three sessions orbiting it, coloured like the sidebar's status dots (blue working, amber needs input, grey idle), on a dark navy rounded square.
+
+**Done**
+- `assets/icon/AppIcon.svg` (source, on the macOS 824/1024 grid) and `assets/icon/AppIcon.icns` (16–1024 px, PNG entries, 11 sizes).
+- `scripts/bundle-macos.sh` copies the icon into `Contents/Resources` and sets `CFBundleIconFile`; `scripts/install-macos.sh` touches the installed app so Finder and the Dock reload the icon.
+- `scripts/render-icon.js` (Playwright's Chromium) renders the SVG at every size; `scripts/make-icns.py` packs the PNGs into the `.icns` without Apple tools.
+
+**Manual checks (Mac)**
+- [ ] `scripts/install-macos.sh --open`: the Dock, Finder, Launchpad and ⌘-Tab show the new icon.
+- [ ] If an old generic icon sticks in the Dock, remove the app from the Dock and add it again (macOS caches icons).

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Anveg Code app icon, "Session Orbit": a prompt at the centre with three
+       sessions orbiting it, coloured like the sidebar's status dots.
+       On the macOS icon grid: 824 x 824 rounded square, 185 px corners. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#141a2a"/>
+  <ellipse cx="512" cy="512" rx="300" ry="300" fill="none" stroke="#2f3a55" stroke-width="16"/>
+  <rect x="372" y="372" width="280" height="280" rx="64" fill="#f2efe8"/>
+  <polyline points="440,452 500,512 440,572" fill="none" stroke="#141a2a" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="524" y="548" width="76" height="28" rx="10" fill="#d9653b"/>
+  <circle cx="512" cy="212" r="46" fill="#5aa2ff"/>
+  <circle cx="772" cy="662" r="46" fill="#f6b73c"/>
+  <circle cx="252" cy="662" r="46" fill="#9aa6bf"/>
+</svg>

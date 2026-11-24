@@ -91,6 +91,7 @@ From a Linux machine, `scripts/check-macos.sh` type-checks the macOS build, incl
 - `scripts/fake-gh`: a stand-in for the GitHub CLI with fixed pull requests, checks and runs. `FAKE_GH_LOG=<file>` records every call.
 - `scripts/fake-lsp`: a tiny language server (python3) for trying diagnostics, completion, hover and formatting; set it as a server command in Settings.
 - `scripts/measure-idle.sh [seconds]`: idle CPU and memory of a running Anveg Code.
+- **App icon:** `assets/icon/AppIcon.svg` is the source; `assets/icon/AppIcon.icns` is what the bundle uses. After editing the SVG, render it with `node scripts/render-icon.js assets/icon/AppIcon.svg <dir>` (needs Playwright's Chromium) and pack it with `scripts/make-icns.py <dir> assets/icon/AppIcon.icns`.
 
 ## Files
 

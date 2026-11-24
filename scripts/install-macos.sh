@@ -67,6 +67,8 @@ ditto "$SRC" "$TMP"
 rm -rf "$TARGET"
 mv "$TMP" "$TARGET"
 xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+# A new modification date makes Finder and the Dock reload the icon.
+touch "$TARGET"
 
 # Let Launch Services (Spotlight, Dock, "Open With") know about it.
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
