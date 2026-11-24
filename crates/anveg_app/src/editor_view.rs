@@ -167,11 +167,24 @@ impl EditorView {
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let started = std::time::Instant::now();
         let task = cx.background_spawn(async move { files::load_text(&path) });
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(loaded) => this.loaded(loaded, window, cx),
+                Ok(loaded) => {
+                    let lines = loaded.text.lines().count();
+                    this.loaded(loaded, window, cx);
+                    let path = this.path.display().to_string();
+                    window.on_next_frame(move |_, _| {
+                        tracing::info!(
+                            %path,
+                            lines,
+                            ms = started.elapsed().as_millis() as u64,
+                            "file opened (first frame)"
+                        );
+                    });
+                }
                 Err(error) => {
                     this.error = Some(format!("{error:#}").into());
                     cx.notify();

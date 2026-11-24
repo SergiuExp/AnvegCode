@@ -630,6 +630,7 @@ Exercised under Xvfb in a demo repository (fake Claude, fake gh, fake language s
 - ⌘-click on `src/main.rs:6:4` in a shell opened the file at line 6, column 4.
 - ⌘P quick open.
 - Discard Hunk: the dialog, then the hunk was gone and a copy of the file was in the Trash.
+- Release build: a 10,000-line Rust file reached its first frame **37 ms** after the click (target: under 200 ms). The log line `file opened (first frame) … ms=` measures it on a Mac.
 - Release build, Git tab and a diff open, 30 s idle: **0.57 % CPU, no `git` or `gh` process**, one status refresh in total. RSS was 185 MB, mostly Mesa's software renderer (llvmpipe) under Xvfb; measure on a Mac before drawing conclusions.
 
 **Bugs found and fixed while testing**
