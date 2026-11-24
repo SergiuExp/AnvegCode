@@ -496,7 +496,7 @@ impl FilesPanel {
                     .items_center()
                     .gap_1()
                     .cursor_pointer()
-                    .when(selected, |el| el.bg(c.selection))
+                    .when(selected, |el| el.bg(c.selected_row))
                     .hover(|el| el.bg(c.accent.opacity(0.5)))
                     .child(div().w(px(10.)).text_xs().text_color(c.muted_foreground).child(icon))
                     .child(
@@ -803,7 +803,7 @@ impl Render for QuickOpen {
                         .flex()
                         .gap_2()
                         .cursor_pointer()
-                        .when(n == self.selected, |el| el.bg(c.selection))
+                        .when(n == self.selected, |el| el.bg(c.selected_row))
                         .hover(|el| el.bg(c.accent.opacity(0.5)))
                         .child(div().text_sm().child(name))
                         .child(

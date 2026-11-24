@@ -60,6 +60,14 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         anveg_term::init(cx);
+        // Development aid: ANVEG_THEME=dark|light in debug builds, for
+        // machines without a system appearance setting (Linux under Xvfb).
+        #[cfg(debug_assertions)]
+        match std::env::var("ANVEG_THEME").as_deref() {
+            Ok("dark") => gpui_cn::Theme::change(gpui_cn::ThemeMode::Dark, cx),
+            Ok("light") => gpui_cn::Theme::change(gpui_cn::ThemeMode::Light, cx),
+            _ => {}
+        }
         component_theme::sync(cx);
         actions::bind_keys(cx);
 

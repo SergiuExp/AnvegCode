@@ -18,7 +18,11 @@ pub struct Colors {
     pub border: Hsla,
     pub accent: Hsla,
     pub primary: Hsla,
-    pub selection: Hsla,
+    /// The selected row in a list: a tint of the theme's accent blue, strong
+    /// enough to read on the dark sidebar too.
+    pub selected_row: Hsla,
+    /// The bar on the left edge of the selected row.
+    pub selected_bar: Hsla,
     pub destructive: Hsla,
     pub sidebar: Hsla,
 }
@@ -33,7 +37,8 @@ impl Colors {
             border: t.border(),
             accent: t.accent(),
             primary: t.primary(),
-            selection: t.secondary(),
+            selected_row: t.ring().opacity(if t.is_dark() { 0.30 } else { 0.16 }),
+            selected_bar: t.ring(),
             destructive: t.destructive(),
             sidebar: t.muted().opacity(0.5),
         }

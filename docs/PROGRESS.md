@@ -669,3 +669,18 @@ Exercised under Xvfb in a demo repository (fake Claude, fake gh, fake language s
 - [ ] New Session on a multi-line note: a new session starts with it as the first message.
 - [ ] `+` ▸ "Milestone 3"; add notes; Move… one to Notes; Delete Tab…: its notes land in Notes.
 - [ ] Archive ▸ Restore: the note goes back to its tab.
+
+---
+
+## Change: a clearer selected session (2026-11-24)
+
+The owner found the selected session hard to see, especially in dark mode: the row used the theme's "secondary" surface, barely lighter than the dark sidebar.
+
+**Done**
+- The selected row (sessions list, file tree, quick open) is tinted with the theme's accent blue (30 % in dark mode, 16 % in light), and the selected session also gets a solid blue bar on its left edge and a medium-weight title. Hovering other rows is unchanged.
+- Debug builds take `ANVEG_THEME=dark` or `ANVEG_THEME=light` to force the app theme, for checking on machines without a system appearance (Linux under Xvfb). Release builds ignore it.
+
+**Manual checks**
+- [ ] Dark mode: the selected session is obvious at a glance; ⌘⇧] / ⌘⇧[ move it.
+- [ ] Light mode: the same.
+- [ ] Multi-select with ⌘-click: every selected row is highlighted.

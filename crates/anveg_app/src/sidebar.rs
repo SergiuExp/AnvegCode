@@ -249,8 +249,21 @@ impl ProjectWindow {
                             .items_center()
                             .gap_2()
                             .cursor_pointer()
-                            .when(selected, |el| el.bg(c.selection))
-                            .hover(|el| el.bg(c.accent.opacity(0.5)))
+                            .when(selected, |el| el.bg(c.selected_row))
+                            .when(!selected, |el| el.hover(|el| el.bg(c.accent.opacity(0.5))))
+                            .relative()
+                            .when(selected, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top(px(8.))
+                                        .bottom(px(8.))
+                                        .w(px(3.))
+                                        .rounded_full()
+                                        .bg(c.selected_bar),
+                                )
+                            })
                             .child(dot)
                             .child(
                                 div()
@@ -263,6 +276,9 @@ impl ProjectWindow {
                                             .truncate()
                                             .text_sm()
                                             .text_color(c.foreground)
+                                            .when(selected, |el| {
+                                                el.font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            })
                                             .child(s.display_name.clone()),
                                     )
                                     .child(
