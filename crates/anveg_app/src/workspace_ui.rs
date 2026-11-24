@@ -8,11 +8,14 @@ use anveg_core::config::SidebarTab;
 use gpui_cn::prelude::*;
 use gpui_cn::{InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Focusable as _, InteractiveElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
     IntoElement, ParentElement as _,
     SharedString, Styled as _, Window, div,
 };
 
+use anveg_core::notes::SendKind;
+
+use crate::notes_panel::{NotesEvent, NotesPanel};
 use crate::files_panel::{FileIndex, FilesPanel, QuickOpen, QuickOpenEvent, build_index};
 use crate::git_panel::GitPanel;
 use crate::github::GitHubPanel;
@@ -155,6 +158,134 @@ impl ProjectWindow {
                 .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| div().into_any_element()),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Notes
+    // -----------------------------------------------------------------
+
+    /// Show or hide the Notes panel (toolbar button, ⌘⌥N).
+    pub fn toggle_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.notes_open = !self.notes_open;
+        if self.notes_open && self.notes_panel.is_none() {
+            let path = self
+                .model
+                .read(cx)
+                .paths
+                .notes_file(&self.project_id.to_string());
+            let panel = cx.new(|cx| NotesPanel::new(path, cx));
+            let sub = cx.subscribe_in(&panel, window, Self::on_notes_event);
+            self.push_long_subscription(sub);
+            let sub = cx.subscribe_in(&panel, window, Self::on_workspace_event);
+            self.push_long_subscription(sub);
+            self.notes_panel = Some(panel);
+        }
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    fn on_notes_event(
+        &mut self,
+        panel: &Entity<NotesPanel>,
+        event: &NotesEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.clone() {
+            NotesEvent::Send { note, text } => {
+                let target = self
+                    .selected
+                    .clone()
+                    .filter(|id| self.running.get(id).is_some_and(|r| r.is_live()));
+                let Some(session) = target else {
+                    self.toast(
+                        "Select a running Claude session first (or use New Session).",
+                        cx,
+                    );
+                    return;
+                };
+                let Some(view) = self.running.get(&session).map(|r| r.view.clone()) else {
+                    return;
+                };
+                // A paste, then Enter a moment later, so the Enter is not
+                // taken as part of the paste.
+                view.update(cx, |v, cx| v.paste_text(text, cx));
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(150))
+                        .await;
+                    view.update(cx, |v, cx| v.send_text("\r", cx));
+                })
+                .detach();
+                let name = self.session_name(&session);
+                panel.update(cx, |p, cx| {
+                    p.mark_sent(&note, &session, &name, SendKind::Paste, cx)
+                });
+                self.tab = Tab::Claude;
+                self.show_current(window, cx);
+            }
+            NotesEvent::NewSession { note, text } => {
+                if let Some(session) = self.start_new_session(None, None, Some(text.clone()), window, cx) {
+                    let name: String = text
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim()
+                        .chars()
+                        .take(80)
+                        .collect();
+                    panel.update(cx, |p, cx| {
+                        p.mark_sent(&note, &session, &name, SendKind::NewSession, cx)
+                    });
+                }
+            }
+        }
+    }
+
+    /// The narrow toolbar on the right edge of the window.
+    pub fn render_right_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        div()
+            .w(gpui_kit::px(36.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .pt_1()
+            .border_l_1()
+            .border_color(c.border)
+            .child(
+                Button::new("toolbar-notes")
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .icon(Icon::from(gpui_kit::assets::IconName::FileText))
+                    .toggled(self.notes_open)
+                    .tooltip(if self.notes_open {
+                        "Hide Notes (⌘⌥N)"
+                    } else {
+                        "Show Notes (⌘⌥N)"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_notes(window, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The right side's content, with the Notes panel beside it when open.
+    pub fn with_notes(&mut self, content: AnyElement) -> AnyElement {
+        let Some(panel) = self.notes_panel.clone().filter(|_| self.notes_open) else {
+            return content;
+        };
+        gpui_kit::base::h_resizable("notes-split")
+            .with_state(&self.notes_state)
+            .child(gpui_kit::base::resizable_panel().child(content))
+            .child(
+                gpui_kit::base::resizable_panel()
+                    .size(gpui_kit::px(self.notes_width))
+                    .size_range(gpui_kit::px(240.)..gpui_kit::px(900.))
+                    .child(panel),
+            )
+            .into_any_element()
     }
 
     // -----------------------------------------------------------------

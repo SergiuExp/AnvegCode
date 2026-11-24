@@ -68,6 +68,11 @@ impl AppPaths {
         self.support_dir.join("sessions")
     }
 
+    /// `notes/<project-id>.json`: the Notes panel's tabs and notes.
+    pub fn notes_file(&self, project_id: &str) -> PathBuf {
+        self.support_dir.join("notes").join(format!("{project_id}.json"))
+    }
+
     /// Create the directories if they do not exist.
     pub fn ensure_dirs(&self) -> Result<()> {
         for dir in [&self.support_dir, &self.logs_dir] {

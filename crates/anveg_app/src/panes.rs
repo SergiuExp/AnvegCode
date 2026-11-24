@@ -522,6 +522,8 @@ impl Render for ProjectWindow {
         let tabs = self.render_tab_strip(cx);
         let banner = self.render_banner(cx);
         let right = self.render_right(cx);
+        let right = self.with_notes(right);
+        let toolbar = self.render_right_toolbar(cx);
         let dialog = self.render_dialog(window, cx);
         let toast = self.toast.clone();
         let sidebar_width = self.sidebar_width;
@@ -585,6 +587,7 @@ impl Render for ProjectWindow {
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| this.toggle_notes(window, cx)))
             .on_action(cx.listener(|this, _: &SaveAll, window, cx| this.save_all(window, cx)))
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| {
                 // The editor handles ⌘S when it has focus; this is the menu.
@@ -650,7 +653,14 @@ impl Render for ProjectWindow {
                                 .flex_col()
                                 .child(TitleBar::new().inset(false).child(tabs))
                                 .children(banner)
-                                .child(div().flex_1().min_h_0().child(right)),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .flex()
+                                        .child(div().flex_1().min_w_0().h_full().child(right))
+                                        .child(toolbar),
+                                ),
                         ),
                     ),
             )

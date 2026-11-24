@@ -10,6 +10,7 @@ pub mod fswatch;
 pub mod gh;
 pub mod git;
 pub mod launcher;
+pub mod notes;
 pub mod paths;
 pub mod procinfo;
 pub mod process;

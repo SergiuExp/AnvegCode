@@ -18,6 +18,7 @@ mod lsp_manager;
 mod logging;
 mod menus;
 mod model;
+mod notes_panel;
 mod panes;
 mod platform;
 mod project_window;

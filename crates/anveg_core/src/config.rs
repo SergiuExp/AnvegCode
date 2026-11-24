@@ -385,6 +385,15 @@ pub struct WindowState {
     /// Phase 4: folders expanded in the Files tab.
     #[serde(default)]
     pub expanded_folders: Vec<PathBuf>,
+    /// Notes: whether the Notes panel is open, and its width.
+    #[serde(default)]
+    pub notes_open: bool,
+    #[serde(default = "default_notes_width")]
+    pub notes_width: f32,
+}
+
+fn default_notes_width() -> f32 {
+    340.0
 }
 
 fn default_sidebar_width() -> f32 {
@@ -415,6 +424,8 @@ impl WindowState {
             docs: Vec::new(),
             active_doc: None,
             expanded_folders: Vec::new(),
+            notes_open: false,
+            notes_width: default_notes_width(),
         }
     }
 }

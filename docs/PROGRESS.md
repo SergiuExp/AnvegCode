@@ -643,3 +643,29 @@ Exercised under Xvfb in a demo repository (fake Claude, fake gh, fake language s
 - In a dialog whose only action is destructive (Discard, Delete, Drop), Enter closes it without doing anything; the action needs a click.
 - Git diff tabs follow outside changes only while the Files, Git or GitHub tab is shown (that is when git status is watched). Otherwise they update on the next git operation or when one of those tabs is shown again.
 - `scripts/check-macos.sh` now needs `zig` on Linux (for the grammars' C code); it passes.
+
+---
+
+## Notes panel (owner's request, 2026-11-24)
+
+**Done**
+- A **toolbar on the right edge** of the window. Its first button (also ⌘⌥N, View ▸ Notes) shows or hides the **Notes panel**, which sits beside the right side's tabs and can be resized. Open/closed and the width are kept per window.
+- Tabs: **Notes** (the default), the user's own tabs (`+`, for example "Milestone 3"; Rename Tab… and Delete Tab… — a deleted tab's notes move to Notes), and **Archive**.
+- Every tab except Archive always ends with an **empty note**. Typing into it makes it a note (focus and cursor stay) and a new empty note appears below. Notes left empty are dropped the next time the file is loaded.
+- Each note has **Send** and **New Session**:
+  - **Send** pastes the note into the session selected in the sidebar (if it is running) and **presses Enter** 150 ms later. With no running session selected, a message says so and the note stays.
+  - **New Session** starts `claude --session-id <id> … -- "<note>"`, so the note is the session's first message (checked with Claude Code: multi-line text and text starting with `-` both work). The session is named after it, as with any first prompt.
+  - Either way the note moves to the **Archive**, which shows where it went ("Sent to “…”" / "Started session “…”", when, how many times). From the Archive a note can be sent again, Restored to the tab it came from, or deleted.
+- Move… moves a note to another tab; deleting a note with text asks first.
+- **Storage:** `~/Library/Application Support/Anveg Code/notes/<project-id>.json` (tabs and notes, written atomically 400 ms after the last keystroke, and at once when the window closes or the app quits). **Nothing is written in the project folder.** `anveg_core::notes` has the model, with tests.
+- `scripts/fake-claude` accepts `-- <prompt>` and treats it as the first message.
+
+**Verified under Xvfb:** writing notes (saved as typed), New Session with a two-line note (the fake Claude received it as its first message), Send into the running session (pasted and submitted), the Archive entries, a "Milestone 3" tab, restart (tabs, notes and the open panel came back), Send with no running session (message, note kept), and the always-present empty note.
+
+**Manual checks**
+- [ ] ⌘⌥N or the toolbar button: the panel opens and closes; drag its edge; relaunch: same state and width.
+- [ ] Type in the empty note: a new empty one appears below.
+- [ ] Select a running session, Send: the text appears in Claude's prompt and is submitted; the note is in Archive.
+- [ ] New Session on a multi-line note: a new session starts with it as the first message.
+- [ ] `+` ▸ "Milestone 3"; add notes; Move… one to Notes; Delete Tab…: its notes land in Notes.
+- [ ] Archive ▸ Restore: the note goes back to its tab.

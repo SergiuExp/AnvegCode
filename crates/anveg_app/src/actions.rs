@@ -54,6 +54,8 @@ actions!(
         ShowGitHub,
         // Phase 5
         Commit,
+        // Notes
+        ToggleNotes,
     ]
 );
 
@@ -95,6 +97,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-8", OpenSession8, None),
         KeyBinding::new("cmd-9", OpenSession9, None),
         KeyBinding::new("cmd-p", QuickOpen, None),
+        KeyBinding::new("cmd-alt-n", ToggleNotes, None),
         KeyBinding::new("cmd-alt-s", SaveAll, None),
         KeyBinding::new("cmd-shift-w", CloseTab, None),
         KeyBinding::new("cmd-shift-1", ShowSessions, None),

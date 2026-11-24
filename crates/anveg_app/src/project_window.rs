@@ -197,6 +197,11 @@ pub struct ProjectWindow {
     pub git_store: Entity<GitStore>,
     pub quick_open: Option<Entity<crate::files_panel::QuickOpen>>,
     pub file_index: Option<crate::files_panel::FileIndex>,
+    /// Notes: the panel (created when first opened), and its layout.
+    pub notes_panel: Option<Entity<crate::notes_panel::NotesPanel>>,
+    pub notes_open: bool,
+    pub notes_width: f32,
+    pub notes_state: Entity<ResizableState>,
     /// The right side's tab strip, to scroll the shown tab into view.
     pub tab_scroll: gpui_kit::ScrollHandle,
     pub saved_expanded: Vec<PathBuf>,
@@ -342,6 +347,16 @@ impl ProjectWindow {
             },
         };
         let git_store = cx.new(|cx| GitStore::new(project_id, cx));
+        let notes_state = cx.new(|_| ResizableState::default());
+        subscriptions.push(cx.subscribe(
+            &notes_state,
+            |this, state, _: &ResizablePanelEvent, cx| {
+                if let Some(width) = state.read(cx).sizes().get(1) {
+                    this.notes_width = f32::from(*width).clamp(240.0, 900.0);
+                    this.save_soon(cx);
+                }
+            },
+        ));
         subscriptions.push(cx.observe_in(&git_store, window, |this, _, window, cx| {
             this.on_git_store_changed(window, cx);
         }));
@@ -378,6 +393,10 @@ impl ProjectWindow {
             git_store,
             quick_open: None,
             file_index: None,
+            notes_panel: None,
+            notes_open: false,
+            notes_width: saved.notes_width.clamp(240.0, 900.0),
+            notes_state,
             tab_scroll: gpui_kit::ScrollHandle::new(),
             saved_expanded: saved.expanded_folders.clone(),
             sidebar_state,
@@ -413,6 +432,9 @@ impl ProjectWindow {
             }
         }
         this.show_sidebar_tab(saved.sidebar_tab, window, cx);
+        if saved.notes_open {
+            this.toggle_notes(window, cx);
+        }
         this.try_pending_resume(window, cx);
         this.focus_main(window, cx);
         this
@@ -762,7 +784,7 @@ impl ProjectWindow {
         let start = SessionStart::Resume {
             session_id: id.clone(),
         };
-        if self.start_claude(start, worktree, false, window, cx) {
+        if self.start_claude(start, worktree, false, None, window, cx) {
             self.show_current(window, cx);
         }
     }
@@ -785,7 +807,7 @@ impl ProjectWindow {
             from: from.to_owned(),
             session_id: session_id.clone(),
         };
-        if self.start_claude(start, worktree, true, window, cx) {
+        if self.start_claude(start, worktree, true, None, window, cx) {
             self.selected = Some(session_id);
             self.multi.clear();
             self.tab = Tab::Claude;
@@ -802,6 +824,19 @@ impl ProjectWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_new_session(name, worktree, None, window, cx);
+    }
+
+    /// Start a new session, optionally with a first message that Claude
+    /// receives as if typed and sent. Returns the session id if it started.
+    pub fn start_new_session(
+        &mut self,
+        name: Option<String>,
+        worktree: Option<String>,
+        prompt: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let session_id = launcher::new_session_id();
         let start = match &worktree {
             Some(w) => SessionStart::Worktree {
@@ -828,17 +863,19 @@ impl ProjectWindow {
         }
         // A worktree session runs in the main folder; `claude --worktree`
         // creates and enters the worktree itself.
-        if self.start_claude(start, None, true, window, cx) {
+        if self.start_claude(start, None, true, prompt, window, cx) {
             if let Some(r) = self.running.get_mut(&session_id) {
                 r.worktree = worktree;
             }
-            self.selected = Some(session_id);
+            self.selected = Some(session_id.clone());
             self.multi.clear();
             self.tab = Tab::Claude;
             self.show_current(window, cx);
+            Some(session_id)
         } else {
             self.pending_new.retain(|p| p.id != session_id);
             self.rebuild_rows(cx);
+            None
         }
     }
 
@@ -880,6 +917,7 @@ impl ProjectWindow {
         start: SessionStart,
         worktree: Option<String>,
         new_unsaved: bool,
+        initial_prompt: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -928,6 +966,7 @@ impl ProjectWindow {
             default_flags,
             hooks_settings: m.hooks.as_ref().map(|h| h.settings_file.clone()),
             hook_socket: m.hooks.as_ref().map(|h| h.socket.clone()),
+            initial_prompt,
         };
         let settings = m.terminal_settings();
         let cwd = match &worktree {
@@ -1061,6 +1100,9 @@ impl ProjectWindow {
 
     /// Stop every Claude session and shell in this window.
     pub fn stop_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(notes) = &self.notes_panel {
+            notes.update(cx, |n, _| n.flush());
+        }
         for running in self.running.values_mut() {
             if running.ended.is_none() {
                 running.view.update(cx, |v, cx| v.stop(cx));
@@ -1967,6 +2009,8 @@ impl ProjectWindow {
                 Some(p) => p.read(_cx).expanded_list(),
                 None => self.saved_expanded.clone(),
             },
+            notes_open: self.notes_open,
+            notes_width: self.notes_width,
         }
     }
 

@@ -129,6 +129,9 @@ pub struct ClaudeOptions {
     pub hooks_settings: Option<PathBuf>,
     /// Phase 2: the socket `anveg-hook` reports to.
     pub hook_socket: Option<PathBuf>,
+    /// Notes: the first message of a new session (`claude -- <prompt>`),
+    /// sent as if typed and submitted.
+    pub initial_prompt: Option<String>,
 }
 
 /// The arguments for `claude`.
@@ -174,6 +177,21 @@ pub fn claude_args(start: &SessionStart, options: &ClaudeOptions) -> Vec<String>
         args.push(settings.to_string_lossy().into_owned());
     }
     args.extend(options.default_flags.iter().cloned());
+    // Last, after `--`, so a prompt starting with `-` is never a flag.
+    // Only new sessions take one.
+    let new = matches!(
+        start,
+        SessionStart::New { .. } | SessionStart::Worktree { .. }
+    );
+    if new
+        && let Some(prompt) = options
+            .initial_prompt
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+    {
+        args.push("--".to_owned());
+        args.push(prompt.to_owned());
+    }
     args
 }
 
@@ -252,7 +270,28 @@ mod tests {
             default_flags: vec!["--permission-mode".into(), "plan".into()],
             hooks_settings: None,
             hook_socket: None,
+            initial_prompt: None,
         }
+    }
+
+    #[test]
+    fn a_new_session_can_start_with_a_prompt() {
+        let options = ClaudeOptions {
+            initial_prompt: Some("-starts with a dash\nand two lines".into()),
+            ..ClaudeOptions::default()
+        };
+        let start = SessionStart::New {
+            session_id: "s".into(),
+            name: None,
+        };
+        let args = claude_args(&start, &options);
+        assert_eq!(
+            &args[args.len() - 2..],
+            ["--", "-starts with a dash\nand two lines"]
+        );
+        // Resumes ignore it.
+        let resume = claude_args(&SessionStart::Resume { session_id: "s".into() }, &options);
+        assert!(!resume.contains(&"--".to_owned()));
     }
 
     #[test]
