@@ -12,6 +12,7 @@ use gpui_kit::{
     SharedString, Subscription, Window,
 };
 
+use crate::commands_view::CommandsView;
 use crate::diff_view::{DiffSource, DiffView};
 use crate::editor_view::EditorView;
 use crate::github::{CreatePrView, LogView, PrView, RunView};
@@ -27,6 +28,7 @@ pub enum DocView {
     Run(Entity<RunView>),
     Log(Entity<LogView>),
     CreatePr(Entity<CreatePrView>),
+    Commands(Entity<CommandsView>),
 }
 
 impl DocView {
@@ -38,6 +40,7 @@ impl DocView {
             Self::Run(v) => v.read(cx).focus_handle(cx),
             Self::Log(v) => v.read(cx).focus_handle(cx),
             Self::CreatePr(v) => v.read(cx).focus_handle(cx),
+            Self::Commands(v) => v.read(cx).focus_handle(cx),
         }
     }
 
@@ -49,6 +52,7 @@ impl DocView {
             Self::Run(v) => v.clone().into_any_element(),
             Self::Log(v) => v.clone().into_any_element(),
             Self::CreatePr(v) => v.clone().into_any_element(),
+            Self::Commands(v) => v.clone().into_any_element(),
         }
     }
 }
@@ -107,6 +111,7 @@ pub fn key_title(key: &DocKey) -> String {
         DocKey::Run { title, .. } => format!("Run: {title}"),
         DocKey::RunLog { title, .. } => format!("Log: {title}"),
         DocKey::CreatePullRequest { .. } => "New Pull Request".into(),
+        DocKey::Commands => "Toolbar Commands".into(),
         DocKey::Compare { path } => format!("{} ↔ disk", file_name(path)),
     }
 }
@@ -227,6 +232,9 @@ impl ProjectWindow {
                 let (repo, id, title) = (repo.clone(), *id, title.clone());
                 DocView::Log(cx.new(|cx| LogView::new(repo, id, title, window, cx)))
             }
+            DocKey::Commands => {
+                DocView::Commands(cx.new(|cx| CommandsView::new(project, window, cx)))
+            }
             DocKey::CreatePullRequest { repo } => {
                 let repo = repo.clone();
                 DocView::CreatePr(cx.new(|cx| CreatePrView::new(repo, window, cx)))
@@ -239,6 +247,7 @@ impl ProjectWindow {
             DocView::Run(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Log(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::CreatePr(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
+            DocView::Commands(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
         };
         if let Some(doc) = self.docs.get_mut(i) {
             doc.view = Some(view);
@@ -381,6 +390,7 @@ impl ProjectWindow {
             WorkspaceEvent::Prompt(prompt) => self.show_prompt(prompt, window, cx),
             // The store refreshes, and then the git diff tabs reload.
             WorkspaceEvent::GitChanged => self.git_changed(cx),
+            WorkspaceEvent::RunCommand(id) => self.run_project_command(&id, window, cx),
         }
     }
 

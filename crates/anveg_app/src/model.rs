@@ -269,8 +269,12 @@ impl AppModel {
         if let Err(error) = self.projects.save(&self.paths.projects_file()) {
             tracing::error!(%error, "could not save projects");
         }
-        // The menus read the model, so rebuild them after this update.
-        cx.defer(|cx| crate::menus::install(cx));
+        // The menus read the model, so rebuild them after this update;
+        // toolbar command shortcuts may have changed too.
+        cx.defer(|cx| {
+            crate::menus::install(cx);
+            crate::project_commands::bind_shortcuts(cx);
+        });
         cx.emit(ModelEvent::ProjectsChanged);
         cx.notify();
     }

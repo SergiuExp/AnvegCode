@@ -155,6 +155,9 @@ pub struct Project {
     pub main_folder: PathBuf,
     #[serde(default)]
     pub extra_folders: Vec<PathBuf>,
+    /// Toolbar commands (build, run, test…), in toolbar order.
+    #[serde(default)]
+    pub commands: Vec<ProjectCommand>,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds.
@@ -174,6 +177,7 @@ impl Project {
             name,
             main_folder,
             extra_folders: Vec::new(),
+            commands: Vec::new(),
             created_at: now,
             last_opened_at: now,
         }
@@ -182,6 +186,42 @@ impl Project {
     /// Whether the main folder still exists.
     pub fn folder_exists(&self) -> bool {
         self.main_folder.is_dir()
+    }
+}
+
+/// A toolbar command: a button (and optional shortcut) that runs a shell
+/// command in a terminal tab, in the project's main folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectCommand {
+    pub id: String,
+    pub name: String,
+    /// Typed into an interactive login shell, as if by hand.
+    pub command: String,
+    /// A GPUI keystroke such as `cmd-shift-b`; empty for none.
+    #[serde(default)]
+    pub shortcut: String,
+    #[serde(default = "yes")]
+    pub show_in_toolbar: bool,
+    /// Off: the command has its own terminal tab and runs there again
+    /// (stopping a run that is still going). On: a new tab every time.
+    #[serde(default)]
+    pub new_terminal: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl ProjectCommand {
+    pub fn new(name: &str, command: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_owned(),
+            command: command.to_owned(),
+            shortcut: String::new(),
+            show_in_toolbar: true,
+            new_terminal: false,
+        }
     }
 }
 
@@ -310,6 +350,8 @@ pub enum DocKey {
         id: u64,
         title: String,
     },
+    /// The project's toolbar commands editor.
+    Commands,
     /// The form for a new pull request from the current branch.
     CreatePullRequest {
         repo: PathBuf,
@@ -540,6 +582,26 @@ mod tests {
         store.projects = vec![a, b];
         let names: Vec<_> = store.recent().iter().map(|p| p.name.clone()).collect();
         assert_eq!(names, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn project_commands_round_trip_with_defaults() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("projects.json");
+        let mut store = ProjectStore::default();
+        let id = store.open_folder(dir.path())?;
+        if let Some(p) = store.get_mut(id) {
+            p.commands.push(ProjectCommand::new("Build", "cargo build"));
+        }
+        store.save(&path)?;
+        assert_eq!(ProjectStore::load(&path), store);
+        // Older files (and minimal entries) get the defaults.
+        let c: ProjectCommand =
+            serde_json::from_str(r#"{"id":"x","name":"Run","command":"cargo run"}"#)?;
+        assert!(c.show_in_toolbar);
+        assert!(!c.new_terminal);
+        assert!(c.shortcut.is_empty());
+        Ok(())
     }
 
     #[test]

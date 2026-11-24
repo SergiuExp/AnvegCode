@@ -19,7 +19,7 @@ use crate::notes_panel::{NotesEvent, NotesPanel};
 use crate::files_panel::{FileIndex, FilesPanel, QuickOpen, QuickOpenEvent, build_index};
 use crate::git_panel::GitPanel;
 use crate::github::GitHubPanel;
-use crate::project_window::{DialogKind, ProjectWindow, Tab};
+use crate::project_window::{DialogKind, ProjectWindow, Tab, TermSlot};
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt};
 
@@ -469,6 +469,120 @@ impl ProjectWindow {
     // -----------------------------------------------------------------
     // Terminals
     // -----------------------------------------------------------------
+
+    /// Run a toolbar command: in its own terminal tab (running it again
+    /// stops a run that is still going, with Ctrl-C, first), or in a new
+    /// tab each time when the command asks for that.
+    pub fn run_project_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .project(cx)
+            .and_then(|p| p.commands.into_iter().find(|c| c.id == id))
+        else {
+            return;
+        };
+        if command.command.trim().is_empty() {
+            self.toast("This command is empty: set it in Toolbar Commands.", cx);
+            return;
+        }
+        let label: SharedString = if command.name.trim().is_empty() {
+            "Command".into()
+        } else {
+            command.name.clone().into()
+        };
+        let reuse = (!command.new_terminal)
+            .then(|| {
+                self.terminals
+                    .iter()
+                    .position(|t| t.command_id.as_deref() == Some(id))
+            })
+            .flatten();
+        let i = match reuse {
+            Some(i) => i,
+            None => {
+                let mut slot = TermSlot::empty();
+                slot.command_id = Some(id.to_owned());
+                self.terminals.push(slot);
+                self.terminals.len() - 1
+            }
+        };
+        self.terminals[i].label = Some(label);
+        let fresh = self.terminals[i].view.is_none() || self.terminals[i].ended.is_some();
+        if fresh {
+            if let Some(old) = self.terminals[i].view.take() {
+                old.update(cx, |v, cx| v.stop(cx));
+            }
+            self.start_shell(i, window, cx);
+        }
+        self.tab = Tab::Terminal(i);
+        self.show_current(window, cx);
+        let Some(view) = self.terminals[i].view.clone() else {
+            return;
+        };
+        let busy = !fresh && view.read(cx).is_busy(cx);
+        let line = format!("{}\r", command.command.trim());
+        cx.spawn(async move |_, cx| {
+            if fresh {
+                // Let the shell start; what is typed before its prompt
+                // is read once it is ready.
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+            }
+            if busy {
+                view.update(cx, |v, cx| v.send_text("\u{3}", cx));
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+            }
+            view.update(cx, |v, cx| v.send_text(line, cx));
+        })
+        .detach();
+    }
+
+    /// The toolbar commands' buttons, and the button that edits them.
+    pub fn render_command_buttons(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let commands = self.project(cx).map(|p| p.commands).unwrap_or_default();
+        let mut row = div().flex().items_center().gap_0p5().flex_shrink_0();
+        for command in commands.into_iter().filter(|c| c.show_in_toolbar) {
+            let id = command.id.clone();
+            let name = if command.name.trim().is_empty() {
+                "Command".to_owned()
+            } else {
+                command.name.clone()
+            };
+            let tip = if command.shortcut.is_empty() {
+                command.command.clone()
+            } else {
+                format!(
+                    "{}   {}",
+                    command.command,
+                    crate::project_commands::display(&command.shortcut)
+                )
+            };
+            row = row.child(
+                Button::new(SharedString::from(format!("tb-cmd-{id}")))
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .icon(Icon::from(gpui_kit::assets::IconName::Play))
+                    .label(name)
+                    .tooltip(tip)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_project_command(&id, window, cx)
+                    })),
+            );
+        }
+        row.child(
+            Button::new("tb-cmd-edit")
+                .ghost()
+                .size(ButtonSize::Sm)
+                .icon(Icon::from(gpui_kit::assets::IconName::Settings2))
+                .tooltip("Toolbar Commands…")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_doc(anveg_core::config::DocKey::Commands, window, cx)
+                })),
+        )
+        .into_any_element()
+    }
 
     /// ⌘-click on `path:line` in a terminal: open it in the editor.
     pub fn open_link(

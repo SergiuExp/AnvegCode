@@ -240,6 +240,15 @@ impl TerminalView {
         self.state.read(cx).foreground().map(|p| p.pid())
     }
 
+    /// Whether a program other than the shell is in the foreground (a
+    /// command is still running).
+    pub fn is_busy(&self, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .foreground()
+            .is_some_and(|p| !p.is_shell())
+    }
+
     /// Apply new font settings to a running terminal.
     pub fn apply_settings(&mut self, settings: &TerminalSettings, cx: &mut Context<Self>) {
         self.option_as_meta = settings.option_as_meta;

@@ -44,6 +44,7 @@ pub fn install(cx: &App) {
             MenuItem::action("Save All", SaveAll),
             MenuItem::separator(),
             MenuItem::action("Project Settings…", ProjectSettings),
+            MenuItem::action("Toolbar Commands…", EditToolbarCommands),
             MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Window", CloseWindow),
         ]),

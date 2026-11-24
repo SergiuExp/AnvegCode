@@ -80,15 +80,21 @@ pub struct TermSlot {
     pub view: Option<Entity<TerminalView>>,
     pub ended: Option<Ended>,
     pub title: SharedString,
+    /// The toolbar command this tab belongs to (reused for its next run).
+    pub command_id: Option<String>,
+    /// The tab's label instead of "Terminal N" (a toolbar command's name).
+    pub label: Option<SharedString>,
     _events: Option<Subscription>,
 }
 
 impl TermSlot {
-    fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             view: None,
             ended: None,
             title: SharedString::default(),
+            command_id: None,
+            label: None,
             _events: None,
         }
     }
@@ -1377,7 +1383,7 @@ impl ProjectWindow {
         self.show_current(window, cx);
     }
 
-    fn start_shell(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn start_shell(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let (env, settings, folder) = {
             let m = self.model.read(cx);
             let folder = m
@@ -1982,7 +1988,13 @@ impl ProjectWindow {
             },
             sidebar_width: self.sidebar_width,
             running_sessions: running,
-            terminal_tabs: self.terminals.len().max(1),
+            // Command tabs are not restored: the next run makes them again.
+            terminal_tabs: self
+                .terminals
+                .iter()
+                .filter(|t| t.command_id.is_none())
+                .count()
+                .max(1),
             split: self
                 .split
                 .clone()

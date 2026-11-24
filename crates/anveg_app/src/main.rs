@@ -18,6 +18,8 @@ mod lsp_manager;
 mod logging;
 mod menus;
 mod model;
+mod commands_view;
+mod project_commands;
 mod notes_panel;
 mod panes;
 mod platform;
@@ -75,6 +77,7 @@ fn main() {
         cx.set_global(ModelHandle(app_model));
         install_actions(cx);
         menus::install(cx);
+        project_commands::bind_shortcuts(cx);
         platform::init(cx);
 
         // Dock quit, logout and our own quit all end here: save and stop,

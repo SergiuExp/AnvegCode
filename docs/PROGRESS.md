@@ -684,3 +684,25 @@ The owner found the selected session hard to see, especially in dark mode: the r
 - [ ] Dark mode: the selected session is obvious at a glance; ⌘⇧] / ⌘⇧[ move it.
 - [ ] Light mode: the same.
 - [ ] Multi-select with ⌘-click: every selected row is highlighted.
+
+---
+
+## Toolbar commands (owner's request, 2026-11-24)
+
+**Done**
+- Per-project **toolbar commands**: a name, a shell command, an optional shortcut, "Show in toolbar", and "New terminal each time". Stored with the project in `projects.json` (app data folder; nothing in the project).
+- Their **buttons** sit in the top bar, right of the tabs, in the order set in the editor; a gear button (and File ▸ Toolbar Commands…) opens the editor as a tab: add, edit (saved on Enter or when a field loses focus), Run, reorder (↑/↓), show/hide in the toolbar, delete (asks).
+- **Running a command** types it into an interactive login shell in the project's main folder, in a terminal tab named after the command:
+  - by default each command has **its own tab** and reuses it: if the last run is still going (a program other than the shell is in the foreground), it sends **Ctrl-C** first, then runs again; if the tab's shell has exited, a new shell starts in it;
+  - with **New terminal each time**, every run opens a new tab.
+  - Command tabs are not restored after a restart (the next run makes them again).
+- **Shortcuts:** typed like `cmd-shift-b` (`Cmd+Shift+B` is accepted too) or a function key (`f5`). They must use ⌘ or be a function key (every other key belongs to the terminal and Claude) and must not be one the app already uses; mistakes are explained under the field. Hidden commands still run from their shortcut. A shortcut only runs the command of the window's own project; elsewhere the key passes through.
+
+**Verified under Xvfb:** adding a command in the editor (it appeared in the toolbar at once), an invalid shortcut (`ctrl-b`, explained), Build from the toolbar in its own tab, ⌘⇧B while it was running (`^C`, then a fresh run in the same tab), hiding Build (its button left; ⌘⇧B still ran it), and "New terminal each time" (two Hello tabs).
+
+**Manual checks**
+- [ ] Toolbar Commands: add "Build" = `cargo build`, shortcut `cmd-shift-b`; a ▷ Build button appears.
+- [ ] Click it twice during a long build: the first run is stopped and it starts again in the same tab.
+- [ ] Add "Run" with New terminal each time: each click opens a new tab.
+- [ ] Turn off Show in toolbar: the button goes; the shortcut still works.
+- [ ] Two projects with the same shortcut: each window runs its own command.

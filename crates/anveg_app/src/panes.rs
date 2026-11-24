@@ -68,10 +68,10 @@ impl ProjectWindow {
         );
         let many = self.terminals.len() > 1;
         for i in 0..self.terminals.len() {
-            let label = if many {
-                format!("Terminal {}", i + 1)
-            } else {
-                "Terminal".to_owned()
+            let label = match &self.terminals[i].label {
+                Some(label) => label.to_string(),
+                None if many => format!("Terminal {}", i + 1),
+                None => "Terminal".to_owned(),
             };
             let active = self.tab == Tab::Terminal(i);
             strip = strip.child(
@@ -148,7 +148,8 @@ impl ProjectWindow {
                     ),
             );
         }
-        let strip = div().flex().items_center().w_full().min_w_0().child(strip).child(
+        let commands = self.render_command_buttons(cx);
+        let strip = div().flex().items_center().w_full().min_w_0().child(strip).child(commands).child(
             Button::new("toggle-split")
                 .ghost()
                 .size(ButtonSize::Sm)
@@ -588,6 +589,22 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| this.toggle_notes(window, cx)))
+            .on_action(cx.listener(|this, _: &EditToolbarCommands, window, cx| {
+                this.open_doc(anveg_core::config::DocKey::Commands, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &RunProjectCommand, window, cx| {
+                let id = this.project(cx).and_then(|p| {
+                    p.commands
+                        .into_iter()
+                        .find(|c| c.shortcut == action.shortcut)
+                        .map(|c| c.id)
+                });
+                match id {
+                    Some(id) => this.run_project_command(&id, window, cx),
+                    // Not this project's shortcut: let the key through.
+                    None => cx.propagate(),
+                }
+            }))
             .on_action(cx.listener(|this, _: &SaveAll, window, cx| this.save_all(window, cx)))
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| {
                 // The editor handles ⌘S when it has focus; this is the menu.

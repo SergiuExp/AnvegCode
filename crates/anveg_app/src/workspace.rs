@@ -34,6 +34,8 @@ pub enum WorkspaceEvent {
     Prompt(Prompt),
     /// Git state may have changed (after an operation): refresh it.
     GitChanged,
+    /// Run the project's toolbar command with this id.
+    RunCommand(String),
 }
 
 /// What a prompt's button does. Gets the text field's value, if the prompt

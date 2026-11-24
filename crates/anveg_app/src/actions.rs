@@ -56,6 +56,8 @@ actions!(
         Commit,
         // Notes
         ToggleNotes,
+        // Toolbar commands
+        EditToolbarCommands,
     ]
 );
 
@@ -64,6 +66,14 @@ actions!(
 #[action(namespace = anveg, no_json)]
 pub struct OpenRecent {
     pub project_id: Uuid,
+}
+
+/// A toolbar command's shortcut: the window runs its project's command
+/// with this shortcut (see `project_commands.rs`).
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = anveg, no_json)]
+pub struct RunProjectCommand {
+    pub shortcut: String,
 }
 
 /// The key context of the session list, where ⌫ deletes.
