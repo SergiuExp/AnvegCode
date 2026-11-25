@@ -480,7 +480,11 @@ impl ProjectWindow {
     }
 
     fn update_title(&self, window: &mut Window, cx: &App) {
-        window.set_window_title(&self.project_name(cx));
+        let mut title = self.project_name(cx);
+        if crate::model::model(cx).read(cx).paths.is_sandbox() {
+            title.push_str(" (Dev)");
+        }
+        window.set_window_title(&title);
     }
 
     fn on_model_event(

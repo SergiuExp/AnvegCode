@@ -38,7 +38,8 @@ pub fn open(cx: &mut App) {
         ..TitleBar::window_options(cx)
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
-        window.set_window_title("Anveg Code");
+        let sandbox = crate::model::model(cx).read(cx).paths.is_sandbox();
+        window.set_window_title(if sandbox { "Anveg Code (Dev)" } else { "Anveg Code" });
         cx.new(|cx| {
             let model = crate::model::model(cx);
             let sub = cx.observe(&model, |_, _, cx| cx.notify());

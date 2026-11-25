@@ -53,7 +53,11 @@ fn main() {
         }
     };
     let _log_guard = logging::init(&paths);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Anveg Code starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        data = %paths.support_dir.display(),
+        "Anveg Code starting"
+    );
 
     let app = gpui_kit::application().with_assets(app_assets::AppAssets);
     // Clicking the Dock icon with no windows open.

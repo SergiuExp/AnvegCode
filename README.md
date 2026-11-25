@@ -98,6 +98,7 @@ From a Linux machine, `scripts/check-macos.sh` type-checks the macOS build, incl
 
 - **Settings, projects, window state, and the session cache:** `~/Library/Application Support/Anveg Code/`
 - **Log:** `~/Library/Logs/Anveg Code/anveg-code.log`. Set `RUST_LOG=debug` for more detail.
+- **Debug builds** (`cargo run`) use `Anveg Code Dev` in place of `Anveg Code` in both paths above, so debugging never touches the installed app's settings; their window titles end in "(Dev)". Set `ANVEG_HOME=<dir>` to keep everything in `<dir>/support` and `<dir>/logs` instead (e.g. a throwaway sandbox), with any build.
 - **Claude Code's own files** (`~/.claude`, or the directory `claude auth status` reports) are only read. The one exception: Delete moves a session's transcript to the Trash.
 
 ## License

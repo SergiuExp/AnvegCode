@@ -7,6 +7,14 @@ use anyhow::{Context as _, Result};
 /// The folder name used under `Application Support` and `Logs` on macOS.
 pub const APP_DIR_NAME: &str = "Anveg Code";
 
+/// The folder name debug builds use instead of [`APP_DIR_NAME`], so a
+/// `cargo run` never reads or changes the installed app's settings.
+pub const DEV_APP_DIR_NAME: &str = "Anveg Code Dev";
+
+/// Set to a directory to keep everything (settings and logs) there instead,
+/// e.g. a throwaway sandbox: `ANVEG_HOME=/tmp/anveg cargo run`.
+pub const HOME_ENV: &str = "ANVEG_HOME";
+
 /// The name of the log file inside [`AppPaths::logs_dir`].
 pub const LOG_FILE_NAME: &str = "anveg-code.log";
 
@@ -20,32 +28,57 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// The directories for the current user on this platform.
+    /// The directories for the current user on this platform: `$ANVEG_HOME`
+    /// if set, else the standard folders ([`DEV_APP_DIR_NAME`] in debug
+    /// builds, so they never touch the installed app's files).
     pub fn for_current_user() -> Result<Self> {
+        if let Some(home) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
+            return Ok(Self::in_dir(Path::new(&home)));
+        }
         let base = directories::BaseDirs::new().context("could not find the home directory")?;
         Ok(Self::from_base(
             base.home_dir(),
             base.data_dir(),
             base.cache_dir(),
+            cfg!(debug_assertions),
         ))
+    }
+
+    /// Everything under one directory (`$ANVEG_HOME`).
+    fn in_dir(dir: &Path) -> Self {
+        Self {
+            support_dir: dir.join("support"),
+            logs_dir: dir.join("logs"),
+        }
     }
 
     /// Build the paths from a home directory (macOS) or from the platform's
     /// data and cache directories (other platforms, used only for
     /// development builds: macOS is the only supported target).
-    fn from_base(home: &Path, data_dir: &Path, cache_dir: &Path) -> Self {
+    fn from_base(home: &Path, data_dir: &Path, cache_dir: &Path, dev: bool) -> Self {
         if cfg!(target_os = "macos") {
+            let name = if dev { DEV_APP_DIR_NAME } else { APP_DIR_NAME };
             let library = home.join("Library");
             Self {
-                support_dir: library.join("Application Support").join(APP_DIR_NAME),
-                logs_dir: library.join("Logs").join(APP_DIR_NAME),
+                support_dir: library.join("Application Support").join(name),
+                logs_dir: library.join("Logs").join(name),
             }
         } else {
+            let name = if dev { "anveg-code-dev" } else { "anveg-code" };
             Self {
-                support_dir: data_dir.join("anveg-code"),
-                logs_dir: cache_dir.join("anveg-code").join("logs"),
+                support_dir: data_dir.join(name),
+                logs_dir: cache_dir.join(name).join("logs"),
             }
         }
+    }
+
+    /// True for a debug build's or `$ANVEG_HOME`'s directories: not the
+    /// installed app's.
+    pub fn is_sandbox(&self) -> bool {
+        !self
+            .support_dir
+            .file_name()
+            .is_some_and(|n| n == APP_DIR_NAME || n == "anveg-code")
     }
 
     /// `settings.json`.
@@ -93,6 +126,7 @@ mod tests {
             Path::new("/home/u"),
             Path::new("/home/u/.local/share"),
             Path::new("/home/u/.cache"),
+            false,
         );
         assert_eq!(
             paths.settings_file(),
@@ -109,7 +143,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn macos_layout_matches_the_plan() {
-        let paths = AppPaths::from_base(Path::new("/Users/u"), Path::new("x"), Path::new("y"));
+        let paths =
+            AppPaths::from_base(Path::new("/Users/u"), Path::new("x"), Path::new("y"), false);
         assert_eq!(
             paths.support_dir,
             Path::new("/Users/u/Library/Application Support/Anveg Code")
@@ -118,6 +153,24 @@ mod tests {
             paths.logs_dir,
             Path::new("/Users/u/Library/Logs/Anveg Code")
         );
+        assert!(!paths.is_sandbox());
+    }
+
+    #[test]
+    fn dev_builds_use_their_own_dirs() {
+        let base = |dev| {
+            AppPaths::from_base(
+                Path::new("/Users/u"),
+                Path::new("/Users/u/.local/share"),
+                Path::new("/Users/u/.cache"),
+                dev,
+            )
+        };
+        let (installed, dev) = (base(false), base(true));
+        assert_ne!(installed.support_dir, dev.support_dir);
+        assert_ne!(installed.logs_dir, dev.logs_dir);
+        assert!(dev.is_sandbox());
+        assert!(AppPaths::in_dir(Path::new("/tmp/x")).is_sandbox());
     }
 
     #[test]
