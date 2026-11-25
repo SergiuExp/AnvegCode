@@ -539,6 +539,10 @@ impl Render for ProjectWindow {
         let dialog = self.render_dialog(window, cx);
         let toast = self.toast.clone();
         let sidebar_width = self.sidebar_width;
+        // Full screen: the window tabs run across the top, and the
+        // sidebar loses its empty title bar (no window controls there).
+        let window_tabs = self.render_window_tabs(window, cx);
+        let fullscreen = window_tabs.is_some();
 
         div()
             .id("project-window")
@@ -653,6 +657,7 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &OpenSession7, w, cx| this.open_nth(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession8, w, cx| this.open_nth(7, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession9, w, cx| this.open_nth(8, w, cx)))
+            .children(window_tabs)
             .child(
                 h_resizable("sidebar-split")
                     .with_state(&self.sidebar_state)
@@ -667,9 +672,16 @@ impl Render for ProjectWindow {
                                     .flex_col()
                                     .border_r_1()
                                     .border_color(c.border)
-                                    // Room for the traffic lights.
-                                    .child(TitleBar::new())
-                                    .child(sidebar_tabs)
+                                    .map(|el| {
+                                        if fullscreen {
+                                            // No window buttons: the tabs go on
+                                            // one line with the right side's.
+                                            el.child(TitleBar::new().inset(false).child(sidebar_tabs))
+                                        } else {
+                                            // Room for the traffic lights.
+                                            el.child(TitleBar::new()).child(sidebar_tabs)
+                                        }
+                                    })
                                     .child(div().flex_1().min_h_0().child(sidebar)),
                             ),
                     )

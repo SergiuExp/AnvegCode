@@ -48,6 +48,8 @@ pub enum ModelEvent {
     AttentionChanged,
     /// Phase 6: `gh` was (re)detected.
     GhChanged,
+    /// A project window opened or closed (for the full-screen window tabs).
+    WindowsChanged,
 }
 
 /// An open project window.
@@ -293,6 +295,7 @@ impl AppModel {
         self.windows.retain(|w| w.project_id != window.project_id);
         self.windows.push(window);
         self.schedule_save(cx);
+        cx.emit(ModelEvent::WindowsChanged);
     }
 
     /// A project window closed (by the user, not by quitting).
@@ -302,6 +305,7 @@ impl AppModel {
         }
         self.windows.retain(|w| w.project_id != project_id);
         self.save_state_now(cx);
+        cx.emit(ModelEvent::WindowsChanged);
         if self.windows.is_empty() {
             cx.defer(crate::welcome::open);
         }

@@ -772,3 +772,29 @@ A bar above every Claude session (main and split pane). The owner chose: compact
 - [ ] Compact: the meter drops after compaction.
 - [ ] With your own status line in `~/.claude/settings.json`: it still shows at the bottom of Claude's UI.
 - [ ] Settings: turn the status line off, start a new session: the meter shows "≈".
+
+---
+
+## Change: window tabs in full screen, no slide-down title bar (2026-11-25)
+
+The owner reported two full-screen problems on their MacBook: (1) the other project windows' tabs could not be seen, so switching was only possible from the Window menu; (2) moving the pointer to the top slid macOS's title bar (window buttons) down over the app's own top rows. Expected, as in IntelliJ IDEA: tabs on top for switching windows, and nothing covering the UI. Asked for the window tabs row to sit above the Sessions/Files row.
+
+**Done**
+- **Window tabs row** (`window_tabs.rs`): in full screen, a full-width row at the very top of each project window, above the Sessions/Files row and the Claude/Terminal row. One tab per open project window (name, the folder in its tooltip, an amber dot when one of its sessions needs input, × to close that window); the current window's tab is marked. Order: the windows in this window's macOS tab group first, in tab order, then any other project windows (in another full-screen space, or not full screen) in opening order; clicking one brings that window forward (switching space if needed). On the right: **Exit Full Screen** (also ⌃⌘F). Not shown outside full screen.
+- In full screen the sidebar's empty title bar (room for the window buttons) is dropped, so Sessions/Files sits on one line with Claude/Terminal.
+- **The slide-down title bar is hidden in full screen** (macOS): the app observes `NSWindowDidEnterFullScreenNotification` and hides the window's title bar view (the view holding the window buttons and the native tab bar), and shows it again on `NSWindowWillExitFullScreenNotification`, before the exit animation. Revealing the menu bar then shows only the menu bar. The window buttons' jobs are covered by the row (exit, close) and the menus.
+- `ModelEvent::WindowsChanged` (a window opened or closed) and `AttentionChanged` redraw the rows in every window.
+- Debug builds: `ANVEG_WINDOW_TABS=1` shows the row outside full screen too.
+
+**Fixed on the way:** the row read its own window through the model while drawing it, which panicked; it now reads itself directly.
+
+**Verified on Linux** (Xvfb with the Openbox window manager, two project windows): no row in a normal window; the row appears when the window goes full screen; Sessions/Files lines up with Claude/Terminal; clicking the other window's tab brings it forward and its row marks itself; × closes the other window and the row updates; Exit Full Screen leaves full screen.
+
+**Not verified:** the macOS parts (hiding the title bar, tab-group order, switching between tabs of one full-screen window) can only run on a Mac. They type-check for macOS. If the title bar still slides down, the hiding did not take; the tabs row works either way.
+
+**Manual checks (Mac)**
+- [ ] Two project windows, one full screen, ⌘O the other folder: both are tabs; the row at the top shows both; clicking switches without leaving full screen.
+- [ ] Move the pointer to the top edge: only the menu bar appears; the row and the Sessions/Claude rows stay visible.
+- [ ] Exit Full Screen in the row: the window returns to its size with its window buttons back.
+- [ ] A session needing input in the other window: its tab shows an amber dot.
+- [ ] × on the other window's tab closes it (asking first if it has running sessions).

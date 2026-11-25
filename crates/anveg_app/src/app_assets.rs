@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, SharedString};
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Brain, FoldVertical, CircleStop, Eraser]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Brain, FoldVertical, CircleStop, Eraser, Minimize2]);
 
 pub struct AppAssets;
 

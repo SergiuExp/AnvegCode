@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub fn init(cx: &mut App) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
     imp::init(tx);
+    imp::hide_title_bar_in_full_screen();
     cx.spawn(async move |cx| {
         while let Some(identifier) = rx.next().await {
             let Some((project, session)) = parse_identifier(&identifier) else {
@@ -67,14 +68,17 @@ fn parse_identifier(identifier: &str) -> Option<(Uuid, String)> {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod imp {
+    use std::ptr::NonNull;
     use std::sync::{Mutex, OnceLock};
 
     use futures::channel::mpsc::UnboundedSender;
     use objc2::rc::Retained;
-    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{AllocAnyThread as _, MainThreadMarker, define_class, msg_send};
     use objc2_app_kit::NSApplication;
-    use objc2_foundation::{NSBundle, NSError, NSString};
+    use objc2_foundation::{
+        NSBundle, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSString,
+    };
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
@@ -205,6 +209,69 @@ mod imp {
         }
     }
 
+    /// In full screen macOS slides the window's title bar (the window
+    /// buttons, and the window tab bar) down over the top of the window
+    /// whenever the pointer reaches the menu bar. With the app's own title
+    /// bar that covered its top rows, so in full screen the title bar is
+    /// hidden: project windows show their own window tabs and an Exit Full
+    /// Screen button instead (`window_tabs`). It comes back as the window
+    /// starts to leave full screen.
+    pub fn hide_title_bar_in_full_screen() {
+        let center = NSNotificationCenter::defaultCenter();
+        let queue = NSOperationQueue::mainQueue();
+        for (name, hidden) in [
+            ("NSWindowDidEnterFullScreenNotification", true),
+            ("NSWindowWillExitFullScreenNotification", false),
+        ] {
+            let block = block2::RcBlock::new(move |n: NonNull<NSNotification>| {
+                // SAFETY: AppKit passes a live notification.
+                let n = unsafe { n.as_ref() };
+                set_title_bar_hidden(n, hidden);
+            });
+            // SAFETY: the block only touches AppKit on the main queue.
+            let token = unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(&NSString::from_str(name)),
+                    None,
+                    Some(&queue),
+                    &block,
+                )
+            };
+            // Observes for the app's life.
+            std::mem::forget(token);
+        }
+    }
+
+    /// Hide or show the title bar of the notification's window: the view
+    /// that holds the window buttons and the tab bar.
+    fn set_title_bar_hidden(n: &NSNotification, hidden: bool) {
+        let Some(window) = n.object() else {
+            return;
+        };
+        // SAFETY: plain AppKit messages, each result checked before use.
+        unsafe {
+            let is_window: bool = msg_send![&*window, isKindOfClass: objc2::class!(NSWindow)];
+            if !is_window {
+                return;
+            }
+            // NSWindowCloseButton = 0.
+            let button: *mut AnyObject = msg_send![&*window, standardWindowButton: 0usize];
+            let Some(button) = button.as_ref() else {
+                return;
+            };
+            let bar: *mut AnyObject = msg_send![button, superview];
+            let Some(bar) = bar.as_ref() else {
+                return;
+            };
+            let container: *mut AnyObject = msg_send![bar, superview];
+            let Some(container) = container.as_ref() else {
+                return;
+            };
+            let () = msg_send![container, setHidden: hidden];
+        }
+        tracing::debug!(hidden, "full-screen title bar");
+    }
+
     pub fn set_badge(label: Option<String>) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -221,6 +288,8 @@ mod imp {
     use futures::channel::mpsc::UnboundedSender;
 
     pub fn init(_tx: UnboundedSender<String>) {}
+
+    pub fn hide_title_bar_in_full_screen() {}
 
     /// No native window tabs on other platforms.
     pub fn tabbing_mode() -> super::TabbingMode {

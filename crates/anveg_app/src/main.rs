@@ -31,6 +31,7 @@ mod session_toolbar;
 mod sidebar;
 mod ui;
 mod welcome;
+mod window_tabs;
 mod windows;
 mod workspace;
 mod workspace_ui;
