@@ -37,6 +37,8 @@ pub fn install(cx: &App) {
             MenuItem::action("New Terminal", NewTerminal),
             MenuItem::separator(),
             MenuItem::action("Open Project…", OpenFolder),
+            MenuItem::action("Open from GitHub…", OpenFromGitHub),
+            MenuItem::action("Publish to GitHub…", PublishToGitHub),
             MenuItem::action("Go to File…", QuickOpen),
             MenuItem::submenu(Menu::new("Open Recent").items(recent_items)),
             MenuItem::separator(),

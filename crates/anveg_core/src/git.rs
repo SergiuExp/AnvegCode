@@ -23,6 +23,18 @@ pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 pub struct Git {
     pub program: PathBuf,
     pub env: Option<EnvMap>,
+    /// Answers git's https password prompt for github.com with the
+    /// signed-in GitHub token.
+    pub askpass: Option<Askpass>,
+}
+
+/// `GIT_ASKPASS`: a small script (see `github_auth::write_askpass`) that
+/// prints the token from `ANVEG_GIT_TOKEN`, only for github.com prompts.
+/// The token travels in the environment, never on a command line.
+#[derive(Clone, Debug)]
+pub struct Askpass {
+    pub script: PathBuf,
+    pub token: crate::github_api::Secret,
 }
 
 impl Default for Git {
@@ -30,23 +42,39 @@ impl Default for Git {
         Self {
             program: PathBuf::from("git"),
             env: None,
+            askpass: None,
         }
     }
 }
 
 impl Git {
     pub fn new(program: PathBuf, env: Option<EnvMap>) -> Self {
-        Self { program, env }
+        Self {
+            program,
+            env,
+            askpass: None,
+        }
+    }
+
+    pub fn with_askpass(mut self, askpass: Option<Askpass>) -> Self {
+        self.askpass = askpass;
+        self
     }
 
     /// A git command in `repo`.
     pub fn cmd(&self, repo: &Path) -> Cmd {
-        Cmd::new(&self.program)
+        let mut cmd = Cmd::new(&self.program)
             .env(self.env.as_ref())
             .cwd(repo)
             .var("GIT_TERMINAL_PROMPT", "0")
             .var("GIT_OPTIONAL_LOCKS", "0")
-            .args(["-c", "core.quotepath=off", "-c", "color.ui=false"])
+            .args(["-c", "core.quotepath=off", "-c", "color.ui=false"]);
+        if let Some(a) = &self.askpass {
+            cmd = cmd
+                .var("GIT_ASKPASS", a.script.to_string_lossy().into_owned())
+                .var("ANVEG_GIT_TOKEN", a.token.expose());
+        }
+        cmd
     }
 
     /// A command that changes the repository: runs under its lock and may
@@ -326,6 +354,93 @@ impl Git {
             ],
         )?;
         Ok(parse_branches(&out))
+    }
+
+    /// The checked-out branch, `None` when detached.
+    pub fn current_branch(&self, repo: &Path) -> Option<String> {
+        self.read_lines(repo, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .ok()
+            .and_then(|l| l.into_iter().next())
+    }
+
+    /// A remote's URL as configured (before any `url.*.insteadOf`
+    /// rewriting, so a github.com remote still reads as one).
+    pub fn remote_url(&self, repo: &Path, remote: &str) -> Result<String> {
+        let key = format!("remote.{remote}.url");
+        let url = self.read_ok(repo, &["config", "--get", &key])?.trim().to_owned();
+        if url.is_empty() {
+            anyhow::bail!("remote {remote} has no URL");
+        }
+        Ok(url)
+    }
+
+    /// The remote whose URL is github.com/`owner`/`name`.
+    pub fn github_remote_name(&self, repo: &Path, owner: &str, name: &str) -> Option<String> {
+        self.remotes(repo).ok()?.into_iter().find(|r| {
+            self.remote_url(repo, r)
+                .ok()
+                .and_then(|u| crate::github_api::parse_remote(&u))
+                .is_some_and(|(o, n)| o.eq_ignore_ascii_case(owner) && n.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// `git fetch <remote> <refspec>` (network, with the token).
+    pub fn fetch_refspec(&self, repo: &Path, remote: &str, refspec: &str) -> Result<()> {
+        let cmd = self
+            .write_cmd(repo)
+            .args(["fetch", remote, refspec])
+            .timeout(NETWORK_TIMEOUT);
+        process::run(&cmd)?.check().map(drop)
+    }
+
+    /// Switch to `branch`; with `track`, create it from `<track>/<branch>`
+    /// when it does not exist locally.
+    pub fn switch_branch(&self, repo: &Path, branch: &str, track: Option<&str>) -> Result<()> {
+        let exists = self
+            .read(repo, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")])
+            .is_ok_and(|o| o.success());
+        match (exists, track) {
+            (false, Some(remote)) => self
+                .write(repo, &["switch", "-c", branch, "--track", &format!("{remote}/{branch}")])
+                .map(drop),
+            _ => self.write(repo, &["switch", branch]).map(drop),
+        }
+    }
+
+    pub fn init(&self, dir: &Path) -> Result<()> {
+        self.write(dir, &["init", "-q"]).map(drop)
+    }
+
+    pub fn add_remote(&self, repo: &Path, name: &str, url: &str) -> Result<()> {
+        self.write(repo, &["remote", "add", name, url]).map(drop)
+    }
+
+    /// Stage everything and make the first commit.
+    pub fn initial_commit(&self, repo: &Path, message: &str) -> Result<()> {
+        self.stage_all(repo)?;
+        self.commit(repo, message, false).map(drop)
+    }
+
+    /// `git clone <url> <dest>`: cancellable, with progress lines.
+    pub fn clone_repo(
+        &self,
+        url: &str,
+        dest: &Path,
+        cancel: &CancelToken,
+        progress: Option<process::Progress>,
+    ) -> Result<()> {
+        let parent = dest.parent().ok_or_else(|| anyhow::anyhow!("no parent folder"))?;
+        let cmd = self
+            .cmd(parent)
+            .args(["clone", "--progress", url])
+            .arg(dest.to_string_lossy().into_owned())
+            .timeout(NETWORK_TIMEOUT);
+        let out = process::run_with(&cmd, Some(cancel), progress)?;
+        if out.success() {
+            Ok(())
+        } else {
+            bail!("{}", out.message())
+        }
     }
 
     pub fn switch(&self, repo: &Path, branch: &Branch) -> Result<()> {
@@ -1167,6 +1282,40 @@ mod tests {
         git.set_index_content(&dir, "n.txt", b"x\n")?;
         let listed = git.read_ok(&dir, &["ls-files", "-s", "--", "n.txt"])?;
         assert!(listed.starts_with("100644 "), "{listed}");
+        Ok(())
+    }
+
+    #[test]
+    fn clones_and_cancels() -> Result<()> {
+        let (_t, src) = repo()?;
+        sh(&src, "echo x > a && git add a && git commit -qm one")?;
+        let tmp = tempfile::tempdir()?;
+        let dest = tmp.path().join("copy");
+        let git = Git::default();
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let l2 = lines.clone();
+        let progress: process::Progress = std::sync::Arc::new(move |line: &str| {
+            if let Ok(mut v) = l2.lock() {
+                v.push(line.to_owned());
+            }
+        });
+        git.clone_repo(&src.to_string_lossy(), &dest, &CancelToken::new(), Some(progress))?;
+        assert!(dest.join("a").is_file());
+        assert_eq!(git.current_branch(&dest).as_deref(), Some("main"));
+        // A cancelled clone stops with a cancellation error.
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let e = git.clone_repo(&src.to_string_lossy(), &tmp.path().join("c2"), &cancel, None);
+        assert!(e.is_err_and(|e| process::is_cancelled(&e)));
+        // The askpass settings reach git's environment, not its arguments.
+        let with = git.clone().with_askpass(Some(Askpass {
+            script: PathBuf::from("/x/askpass"),
+            token: crate::github_api::Secret::new("sekret"),
+        }));
+        let cmd = with.cmd(&src);
+        assert!(!cmd.display().contains("sekret"));
+        assert!(cmd.extra_env.iter().any(|(k, v)| k == "ANVEG_GIT_TOKEN" && v == "sekret"));
+        assert!(format!("{with:?}").contains("Secret(…)") && !format!("{with:?}").contains("sekret"));
         Ok(())
     }
 

@@ -532,7 +532,7 @@ impl ProjectWindow {
             // The full-screen window tabs show other windows' names and
             // whether they need input.
             ModelEvent::AttentionChanged | ModelEvent::WindowsChanged => cx.notify(),
-            ModelEvent::GhChanged => cx.notify(),
+            ModelEvent::GitHubChanged => cx.notify(),
         }
     }
 

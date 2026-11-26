@@ -10,7 +10,9 @@ Rust crate dependencies, and their licenses, are checked with `cargo deny check 
 | GPUI | `gpui-pre` crates (Zed) | Apache-2.0 | Only the Apache-2.0 GPUI crates are used; no Zed GPL code. |
 | Light terminal palette | `crates/anveg_term/src/lib.rs` | Apache-2.0 (this project) | Written for Anveg Code; the dark palette is Ghostty's default. |
 | gpui-component (editor, diff view, Markdown, tree-sitter highlighting) | `gpui-component` crate via `gpui-kit` | Apache-2.0 | Bundled tree-sitter grammars (Rust, TypeScript/TSX, JavaScript, Python, Go, JSON, TOML, YAML, Markdown, HTML, CSS, Bash, Swift, C, C++, diff) are MIT crates; their highlight queries ship inside the binary. |
-| Language servers, `git`, `gh` | Installed by the user | Various | Run as separate processes; never bundled. |
+| Language servers, `git` | Installed by the user | Various | Run as separate processes; never bundled. |
+| GitHub client: `ureq`, `rustls`, `ring`, `rustls-platform-verifier` | crates | MIT / Apache-2.0 / ISC | HTTPS to GitHub's API; certificates are checked against the operating system's trust store (no root list ships). |
+| `keyring` (macOS Keychain) | crate | MIT / Apache-2.0 | Stores the GitHub token. |
 | Transcript fixtures | `tests/fixtures/transcripts/` | Apache-2.0 (this project) | Recorded from Claude Code 2.1.330 test sessions and sanitized (no attachments, no personal data). |
 
 ## Licenses beyond the default allow-list

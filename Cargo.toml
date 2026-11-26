@@ -66,6 +66,13 @@ nucleo-matcher = "0.3.1"
 similar = "2.7"
 lsp-types = { version = "=0.97.0", features = ["proposed"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# GitHub REST API (replaces the gh CLI): a small blocking HTTP client over
+# rustls with the ring provider, trusting the operating system's
+# certificates (rustls-platform-verifier), so no root list ships.
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip", "json"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The GitHub token lives in the OS keychain, never in a file.
+keyring = { version = "=3.6.3", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

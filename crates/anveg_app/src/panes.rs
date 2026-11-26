@@ -604,6 +604,9 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| this.toggle_notes(window, cx)))
+            .on_action(cx.listener(|this, _: &PublishToGitHub, window, cx| {
+                this.open_doc(anveg_core::config::DocKey::PublishToGitHub, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &EditToolbarCommands, window, cx| {
                 this.open_doc(anveg_core::config::DocKey::Commands, window, cx)
             }))

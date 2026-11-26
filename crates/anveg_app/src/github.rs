@@ -1,5 +1,6 @@
-//! GitHub through `gh` (next phases, Phase 6): the GitHub tab, pull request
-//! and CI run tabs, failed logs, and the new pull request form.
+//! GitHub (next phases, Phase 6; through GitHub's API since the gh CLI was
+//! dropped): the GitHub tab, pull request and CI run tabs, failed logs, the
+//! new pull request form, and signing in.
 //!
 //! Refresh rules (6.8): when a GitHub view is shown, when the window gains
 //! focus, on ⟳, and every 60 s only while the GitHub tab is visible and its
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use anveg_core::config::DocKey;
 use anveg_core::gh::{
-    self, Check, ChecksSummary, GhState, MergeMethod, NewPr, PrAction, PrDetail, PrFilter,
+    self, Check, ChecksSummary, MergeMethod, NewPr, PrAction, PrDetail, PrFilter,
     PrSummary, RateLimited, RepoInfo, Run, RunDetail, RunState,
 };
 use anveg_core::git::NetworkOp;
@@ -27,7 +28,8 @@ use gpui_kit::{
 
 use crate::diff_view::{DiffSource, DiffView};
 use crate::git_panel::GitStore;
-use crate::model::{ModelEvent, model};
+use crate::model::{AuthState, ModelEvent, model};
+use anveg_core::github_api::GitHub;
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
 
@@ -61,15 +63,12 @@ fn checks_badge(s: ChecksSummary, c: &Colors) -> Option<(&'static str, Hsla)> {
     }
 }
 
-/// `gh` once detection has finished (after launch it takes a moment).
-fn gh_ready(cx: &App) -> Option<gh::Gh> {
-    let m = model(cx).read(cx);
-    matches!(m.gh_state, Some(GhState::Ready { .. }))
-        .then(|| m.gh())
-        .flatten()
+/// GitHub's API once signed in (after launch the keychain is read first).
+fn gh_ready(cx: &App) -> Option<GitHub> {
+    model(cx).read(cx).github()
 }
 
-/// Call `f` when `gh` becomes ready (for tabs restored at launch).
+/// Call `f` when signed in (for tabs restored at launch).
 fn on_gh_ready<T: 'static>(
     window: &mut Window,
     cx: &mut Context<T>,
@@ -77,13 +76,20 @@ fn on_gh_ready<T: 'static>(
 ) -> gpui_kit::Subscription {
     let m = model(cx);
     cx.subscribe_in(&m, window, move |this, _, event, window, cx| {
-        if matches!(event, ModelEvent::GhChanged) && gh_ready(cx).is_some() {
+        if matches!(event, ModelEvent::GitHubChanged) && gh_ready(cx).is_some() {
             f(this, window, cx);
         }
     })
 }
 
-fn gh_error(e: &anyhow::Error) -> String {
+/// A GitHub error as words. A rejected token (401) also signs out, so the
+/// GitHub tab offers to sign in again.
+fn gh_error(e: &anyhow::Error, cx: &mut App) -> String {
+    if anveg_core::github_api::is_signed_out(e) {
+        let m = model(cx);
+        cx.defer(move |cx| m.update(cx, |m, cx| m.github_rejected(cx)));
+        return "GitHub no longer accepts the saved sign-in. Sign in again (GitHub tab).".into();
+    }
     if e.downcast_ref::<RateLimited>().is_some() {
         format!("GitHub is rate-limiting requests; trying again later. ({e})")
     } else {
@@ -91,67 +97,121 @@ fn gh_error(e: &anyhow::Error) -> String {
     }
 }
 
-/// The setup steps shown when `gh` is missing or signed out.
-fn setup(state: Option<&GhState>, cx: &mut Context<impl EventEmitter<WorkspaceEvent>>) -> AnyElement {
+/// Signing in, shown wherever GitHub is needed while signed out: "Sign in
+/// with GitHub" (a code to enter in the browser) or a pasted token.
+pub fn sign_in_panel(id: &str, cx: &mut App) -> AnyElement {
     let c = Colors::of(cx);
-    let (title, steps): (&str, Vec<&str>) = match state {
-        None => ("Looking for the GitHub CLI…", vec![]),
-        Some(GhState::Missing) => (
-            "The GitHub tab uses the GitHub CLI (gh).",
-            vec!["Install it:  brew install gh", "Sign in:  gh auth login"],
-        ),
-        Some(GhState::SignedOut { .. }) => (
-            "The GitHub CLI isn't signed in.",
-            vec!["Sign in:  gh auth login"],
-        ),
-        Some(GhState::Ready { .. }) => ("", vec![]),
-    };
-    div()
-        .p_3()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .text_sm()
-        .child(title)
-        .children(steps.into_iter().map(|s| {
-            div()
-                .font_family("Menlo")
-                .text_xs()
-                .text_color(c.muted_foreground)
-                .child(s)
-        }))
-        .when(state.is_some(), |el| {
-            el.child(
+    let m = model(cx).read(cx);
+    let auth = m.github_auth.clone();
+    let device = m.device_sign_in.clone();
+    let note = m.github_note.clone();
+    let key = |s: &str| SharedString::from(format!("{id}-{s}"));
+    let mut panel = div().p_3().flex().flex_col().gap_2().text_sm();
+    if auth == AuthState::Checking && device.is_none() {
+        return panel
+            .text_color(c.muted_foreground)
+            .child("Checking the GitHub sign-in…")
+            .into_any_element();
+    }
+    panel = panel.child("Sign in to GitHub to see pull requests and CI, publish and clone repositories.");
+    match device {
+        Some(d) if d.user_code.is_empty() => {
+            panel = panel.child(div().text_color(c.muted_foreground).child("Asking GitHub for a code…"));
+        }
+        Some(d) => {
+            let (code, uri) = (d.user_code.clone(), d.verification_uri.clone());
+            panel = panel
+                .child(div().text_color(c.muted_foreground).child(format!("Enter this code at {uri}:")))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_2xl().font_family("Menlo").child(code.clone()))
+                        .child(
+                            Button::new(key("copy-code"))
+                                .ghost()
+                                .size(ButtonSize::Sm)
+                                .label("Copy")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()))
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new(key("open-device"))
+                                .primary()
+                                .size(ButtonSize::Sm)
+                                .label("Open GitHub")
+                                .on_click(move |_, _, cx| cx.open_url(&uri)),
+                        )
+                        .child(
+                            Button::new(key("cancel-device"))
+                                .outline()
+                                .size(ButtonSize::Sm)
+                                .label("Cancel")
+                                .on_click(|_, _, cx| {
+                                    let m = model(cx);
+                                    m.update(cx, |m, cx| m.cancel_device_sign_in(cx));
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child("Waiting for you to approve on GitHub…"),
+                );
+        }
+        None => {
+            panel = panel.child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("gh-login")
-                            .outline()
-                            .size(ButtonSize::Sm)
-                            .label("Run gh auth login in a Terminal")
-                            .disabled(matches!(state, Some(GhState::Missing)))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(WorkspaceEvent::RunInTerminal(vec![
-                                    "gh".into(),
-                                    "auth".into(),
-                                    "login".into(),
-                                ]))
-                            })),
-                    )
-                    .child(
-                        Button::new("gh-recheck")
+                        Button::new(key("sign-in"))
                             .primary()
                             .size(ButtonSize::Sm)
-                            .label("Check Again")
+                            .label("Sign in with GitHub")
                             .on_click(|_, _, cx| {
                                 let m = model(cx);
-                                m.update(cx, |m, cx| m.check_gh(true, cx));
+                                m.update(cx, |m, cx| m.start_device_sign_in(cx));
                             }),
-                    ),
-            )
-        })
+                    )
+                    // Settings shows the token field itself.
+                    .when(id != "settings", |el| {
+                        el.child(
+                            Button::new(key("use-token"))
+                                .outline()
+                                .size(ButtonSize::Sm)
+                                .label("Use a Token…")
+                                .on_click(|_, _, cx| crate::settings_window::open(cx)),
+                        )
+                    }),
+            );
+        }
+    }
+    panel
+        .children(note.map(|n| div().text_xs().text_color(c.destructive).child(n)))
         .into_any_element()
+}
+
+/// Opens this project's Publish to GitHub tab.
+fn publish_button(id: &'static str, cx: &mut Context<GitHubPanel>) -> impl IntoElement {
+    div().child(
+        Button::new(id)
+            .outline()
+            .size(ButtonSize::Sm)
+            .label("Publish to GitHub…")
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(WorkspaceEvent::OpenDoc(DocKey::PublishToGitHub))
+            })),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -191,15 +251,17 @@ impl GitHubPanel {
         let m = model(cx);
         let subs = vec![
             cx.observe(&store, |this, store, cx| {
-                // The branch changed: runs are per branch.
+                // The branch changed (runs are per branch), or the GitHub
+                // repository is not known yet (a remote may just have been
+                // added): look again.
                 let branch = this.current_branch(store.read(cx));
-                if branch != this.branch && this.visible {
+                if this.visible && (branch != this.branch || this.info.is_none()) {
                     this.refresh(cx);
                 }
                 cx.notify();
             }),
             cx.subscribe_in(&m, window, |this, _, event, _, cx| {
-                if matches!(event, ModelEvent::GhChanged) {
+                if matches!(event, ModelEvent::GitHubChanged) {
                     if this.visible {
                         this.refresh(cx);
                     }
@@ -273,8 +335,7 @@ impl GitHubPanel {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let ready = matches!(model(cx).read(cx).gh_state, Some(GhState::Ready { .. }));
-        if !ready {
+        if !model(cx).read(cx).is_signed_in() {
             return;
         }
         if self.loading {
@@ -284,7 +345,7 @@ impl GitHubPanel {
         let Some(root) = self.repo_root(cx) else {
             return;
         };
-        let Some(gh) = model(cx).read(cx).gh() else {
+        let Some(gh) = model(cx).read(cx).github() else {
             return;
         };
         let branch = self.current_branch(self.store.read(cx));
@@ -315,14 +376,14 @@ impl GitHubPanel {
                 if let Some(info) = info {
                     match info {
                         Ok(i) => this.info = Some(i),
-                        Err(e) => error = Some(gh_error(&e)),
+                        Err(e) => error = Some(gh_error(&e, cx)),
                     }
                 }
                 match prs {
                     Ok(p) => this.prs = p,
                     Err(e) => {
                         limited |= e.downcast_ref::<RateLimited>().is_some();
-                        error.get_or_insert(gh_error(&e));
+                        error.get_or_insert(gh_error(&e, cx));
                     }
                 }
                 match runs {
@@ -338,7 +399,7 @@ impl GitHubPanel {
                     }
                     Err(e) => {
                         limited |= e.downcast_ref::<RateLimited>().is_some();
-                        error.get_or_insert(gh_error(&e));
+                        error.get_or_insert(gh_error(&e, cx));
                     }
                 }
                 this.backoff = if limited { this.backoff + 1 } else { 0 };
@@ -369,6 +430,19 @@ impl GitHubPanel {
                     })),
             );
         }
+        let error_el = self.error.clone().map(|e| {
+            // Not on GitHub yet: offer to publish it.
+            let unpublished = e.contains("no GitHub remote");
+            div()
+                .px_2()
+                .py_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(c.destructive).child(e))
+                .when(unpublished, |el| el.child(publish_button("gh-publish-remote", cx)))
+                .into_any_element()
+        });
         let prs = self.prs.iter().enumerate().map(|(i, pr)| {
             let key = root.clone().map(|repo| DocKey::PullRequest {
                 repo,
@@ -479,9 +553,7 @@ impl GitHubPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
-            .children(self.error.clone().map(|e| {
-                div().px_2().py_1().text_xs().text_color(c.destructive).child(e)
-            }))
+            .children(error_el)
             .child(div().px_2().pt_1().text_xs().text_color(c.muted_foreground).child("Pull requests"))
             .child(filters)
             .children(prs)
@@ -510,25 +582,30 @@ impl GitHubPanel {
 impl Render for GitHubPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = Colors::of(cx);
-        let state = model(cx).read(cx).gh_state.clone();
-        let body = match &state {
-            Some(GhState::Ready { .. }) => {
+        let signed_in = model(cx).read(cx).is_signed_in();
+        let body = match signed_in {
+            true => {
                 if self.store.read(cx).repos.is_empty() {
+                    let discovered = self.store.read(cx).discovered;
                     div()
                         .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
                         .text_sm()
                         .text_color(c.muted_foreground)
-                        .child(if self.store.read(cx).discovered {
-                            "This project isn't in a git repository."
+                        .child(if discovered {
+                            "This project isn't in a git repository yet."
                         } else {
                             "Looking for git repositories…"
                         })
+                        .when(discovered, |el| el.child(publish_button("gh-publish-new", cx)))
                         .into_any_element()
                 } else {
                     self.render_lists(cx)
                 }
             }
-            other => setup(other.as_ref(), cx),
+            false => sign_in_panel("gh-panel", cx),
         };
         div()
             .id("github-panel")
@@ -599,8 +676,8 @@ impl PrView {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(gh) = gh_ready(cx) else {
-            if matches!(model(cx).read(cx).gh_state, Some(GhState::Missing | GhState::SignedOut { .. })) {
-                self.error = Some("The GitHub CLI (gh) isn't available or isn't signed in.".into());
+            if model(cx).read(cx).github_auth == AuthState::SignedOut {
+                self.error = Some("Not signed in to GitHub (GitHub tab ▸ Sign in).".into());
             }
             return;
         };
@@ -620,7 +697,7 @@ impl PrView {
                 this.error = None;
                 match detail {
                     Ok(d) => this.detail = Some(d),
-                    Err(e) => this.error = Some(gh_error(&e)),
+                    Err(e) => this.error = Some(gh_error(&e, cx)),
                 }
                 this.checks = checks.unwrap_or_default();
                 if let Ok(text) = diff {
@@ -633,7 +710,7 @@ impl PrView {
     }
 
     fn action(&mut self, action: PrAction, cx: &mut Context<Self>) {
-        let Some(gh) = model(cx).read(cx).gh() else {
+        let Some(gh) = model(cx).read(cx).github() else {
             return;
         };
         let label = match &action {
@@ -863,7 +940,7 @@ fn ask_claude_to_fix<T: EventEmitter<WorkspaceEvent>>(
     what: String,
     cx: &mut Context<T>,
 ) {
-    let Some(gh) = model(cx).read(cx).gh() else {
+    let Some(gh) = model(cx).read(cx).github() else {
         return;
     };
     let task = cx.background_spawn(async move {
@@ -1121,7 +1198,7 @@ impl RunView {
                         this.detail = Some(d);
                         this.error = None;
                     }
-                    Err(e) => this.error = Some(gh_error(&e)),
+                    Err(e) => this.error = Some(gh_error(&e, cx)),
                 }
                 cx.notify();
             });
@@ -1129,7 +1206,7 @@ impl RunView {
     }
 
     fn rerun(&mut self, cx: &mut Context<Self>) {
-        let Some(gh) = model(cx).read(cx).gh() else {
+        let Some(gh) = model(cx).read(cx).github() else {
             return;
         };
         self.busy = true;
@@ -1141,10 +1218,10 @@ impl RunView {
                 this.busy = false;
                 match r {
                     Ok(()) => cx.emit(WorkspaceEvent::Toast("Re-running the failed jobs.".into())),
-                    Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
-                        "Could not re-run",
-                        gh_error(&e),
-                    ))),
+                    Err(e) => {
+                        let message = gh_error(&e, cx);
+                        cx.emit(WorkspaceEvent::Prompt(Prompt::message("Could not re-run", message)))
+                    }
                 }
                 this.refresh(cx);
             });
@@ -1339,7 +1416,7 @@ impl LogView {
                             };
                             this.state.update(cx, |s, cx| s.set_value(text, window, cx));
                         }
-                        Err(e) => this.error = Some(gh_error(&e)),
+                        Err(e) => this.error = Some(gh_error(&e, cx)),
                     }
                     cx.notify();
                 });
@@ -1424,7 +1501,7 @@ impl CreatePrView {
     fn prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (git, gh) = {
             let m = model(cx).read(cx);
-            (m.git(), m.gh())
+            (m.git(), m.github())
         };
         let repo = self.repo.clone();
         let task = cx.background_spawn(async move {
@@ -1467,7 +1544,7 @@ impl CreatePrView {
         }
         let (git, gh) = {
             let m = model(cx).read(cx);
-            (m.git(), m.gh())
+            (m.git(), m.github())
         };
         let Some(gh) = gh else {
             return;

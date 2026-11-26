@@ -173,7 +173,8 @@ impl GitStore {
                     })
                     .collect();
                 this.discovered = true;
-                if this.active {
+                // (refresh would look for repositories again when none.)
+                if this.active && !this.repos.is_empty() {
                     this.watch(cx);
                     this.refresh(cx);
                 }
@@ -234,7 +235,9 @@ impl GitStore {
 
     /// Run `git status` (and `git worktree list`) for every repository.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if !self.discovered {
+        // No repository yet: look again (Publish to GitHub may just have
+        // run git init).
+        if !self.discovered || self.repos.is_empty() {
             self.discover(cx);
             return;
         }

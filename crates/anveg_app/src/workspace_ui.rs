@@ -96,10 +96,8 @@ impl ProjectWindow {
         }
     }
 
-    /// The window gained focus: refresh what is visible, re-check `gh`.
+    /// The window gained focus: refresh what is visible.
     pub fn window_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let model = self.model.clone();
-        cx.defer(move |cx| model.update(cx, |m, cx| m.check_gh(false, cx)));
         self.git_store.update(cx, |s, cx| s.refresh_if_active(cx));
         self.update_panel_visibility(window, cx);
     }

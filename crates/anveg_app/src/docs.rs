@@ -14,6 +14,7 @@ use gpui_kit::{
 
 use crate::activity_view::ActivityView;
 use crate::commands_view::CommandsView;
+use crate::publish_view::PublishView;
 use crate::session_buttons_view::SessionButtonsView;
 use crate::diff_view::{DiffSource, DiffView};
 use crate::split_diff_view::SplitDiffView;
@@ -33,6 +34,7 @@ pub enum DocView {
     Log(Entity<LogView>),
     CreatePr(Entity<CreatePrView>),
     Commands(Entity<CommandsView>),
+    Publish(Entity<PublishView>),
     Activity(Entity<ActivityView>),
     SessionButtons(Entity<SessionButtonsView>),
 }
@@ -48,6 +50,7 @@ impl DocView {
             Self::Log(v) => v.read(cx).focus_handle(cx),
             Self::CreatePr(v) => v.read(cx).focus_handle(cx),
             Self::Commands(v) => v.read(cx).focus_handle(cx),
+            Self::Publish(v) => v.read(cx).focus_handle(cx),
             Self::Activity(v) => v.read(cx).focus_handle(cx),
             Self::SessionButtons(v) => v.read(cx).focus_handle(cx),
         }
@@ -63,6 +66,7 @@ impl DocView {
             Self::Log(v) => v.clone().into_any_element(),
             Self::CreatePr(v) => v.clone().into_any_element(),
             Self::Commands(v) => v.clone().into_any_element(),
+            Self::Publish(v) => v.clone().into_any_element(),
             Self::Activity(v) => v.clone().into_any_element(),
             Self::SessionButtons(v) => v.clone().into_any_element(),
         }
@@ -127,6 +131,7 @@ pub fn key_title(key: &DocKey) -> String {
         DocKey::CreatePullRequest { .. } => "New Pull Request".into(),
         DocKey::Commands => "Toolbar Commands".into(),
         DocKey::RangeDiff { title, .. } => title.clone(),
+        DocKey::PublishToGitHub => "Publish to GitHub".into(),
         DocKey::ActivityDetails { title, .. } => title.clone(),
         DocKey::SessionButtons => "Session Buttons".into(),
         DocKey::Compare { path } => format!("{} ↔ disk", file_name(path)),
@@ -280,6 +285,10 @@ impl ProjectWindow {
                     .cloned();
                 DocView::Activity(cx.new(|cx| ActivityView::new(entry, window, cx)))
             }
+            DocKey::PublishToGitHub => {
+                let root = roots.first().cloned().unwrap_or_default();
+                DocView::Publish(cx.new(|cx| PublishView::new(root, window, cx)))
+            }
             DocKey::Commands => {
                 DocView::Commands(cx.new(|cx| CommandsView::new(project, window, cx)))
             }
@@ -300,6 +309,7 @@ impl ProjectWindow {
             DocView::Log(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::CreatePr(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Commands(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
+            DocView::Publish(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Activity(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::SessionButtons(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
         };

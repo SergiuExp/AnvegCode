@@ -1,31 +1,8 @@
-//! GitHub through the `gh` command-line tool (next phases, Phase 6).
-//!
-//! Every call uses `--json` with an explicit field list and parses it with
-//! serde; missing fields are optional. Blocking: run on a background thread.
+//! GitHub's data types, as the app shows them (pull requests, checks,
+//! Actions runs), and helpers over them. They are filled from GitHub's API
+//! by `github_api` (they began as the `gh` CLI's JSON, hence the names).
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use anyhow::{Result, bail};
 use serde::Deserialize;
-
-use crate::claude_env::EnvMap;
-use crate::process::{self, Cmd, Output};
-
-/// How to run gh.
-#[derive(Clone, Debug)]
-pub struct Gh {
-    pub program: PathBuf,
-    pub env: Option<EnvMap>,
-}
-
-/// What `gh --version` and `gh auth status` said.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GhState {
-    Missing,
-    SignedOut { version: String },
-    Ready { version: String },
-}
 
 /// GitHub said "too many requests".
 #[derive(Debug)]
@@ -42,208 +19,6 @@ impl std::error::Error for RateLimited {}
 pub fn is_rate_limited(message: &str) -> bool {
     let m = message.to_lowercase();
     m.contains("rate limit") || m.contains("too many requests")
-}
-
-impl Gh {
-    pub fn new(program: PathBuf, env: Option<EnvMap>) -> Self {
-        Self { program, env }
-    }
-
-    pub fn cmd(&self, dir: &Path) -> Cmd {
-        Cmd::new(&self.program)
-            .env(self.env.as_ref())
-            .cwd(dir)
-            .var("GH_PROMPT_DISABLED", "1")
-            .var("GH_NO_UPDATE_NOTIFIER", "1")
-            .var("NO_COLOR", "1")
-            .var("GIT_TERMINAL_PROMPT", "0")
-            .timeout(Duration::from_secs(60))
-    }
-
-    fn run(&self, dir: &Path, args: &[&str]) -> Result<Output> {
-        let out = process::run(&self.cmd(dir).args(args.iter().copied()))?;
-        if !out.success() && is_rate_limited(&out.message()) {
-            return Err(RateLimited(out.message()).into());
-        }
-        Ok(out)
-    }
-
-    fn run_ok(&self, dir: &Path, args: &[&str]) -> Result<Output> {
-        self.run(dir, args)?.check()
-    }
-
-    fn json<T: serde::de::DeserializeOwned>(&self, dir: &Path, args: &[&str]) -> Result<T> {
-        self.run_ok(dir, args)?.json()
-    }
-
-    /// `gh --version` and `gh auth status`.
-    pub fn detect(&self, dir: &Path) -> GhState {
-        let Ok(out) = process::run(&self.cmd(dir).arg("--version").timeout(Duration::from_secs(10)))
-        else {
-            return GhState::Missing;
-        };
-        if !out.success() {
-            return GhState::Missing;
-        }
-        let version = parse_version(&out.stdout_str());
-        match process::run(
-            &self
-                .cmd(dir)
-                .args(["auth", "status"])
-                .timeout(Duration::from_secs(20)),
-        ) {
-            Ok(o) if o.success() => GhState::Ready { version },
-            _ => GhState::SignedOut { version },
-        }
-    }
-
-    pub fn repo(&self, dir: &Path) -> Result<RepoInfo> {
-        self.json(dir, &["repo", "view", "--json", "nameWithOwner,url,defaultBranchRef"])
-    }
-
-    pub fn pr_list(&self, dir: &Path, filter: PrFilter) -> Result<Vec<PrSummary>> {
-        self.json(
-            dir,
-            &[
-                "pr",
-                "list",
-                "--json",
-                PR_LIST_FIELDS,
-                "--search",
-                filter.search(),
-                "--limit",
-                "50",
-            ],
-        )
-    }
-
-    pub fn pr_view(&self, dir: &Path, number: u64) -> Result<PrDetail> {
-        let n = number.to_string();
-        self.json(dir, &["pr", "view", &n, "--json", PR_VIEW_FIELDS])
-    }
-
-    /// `gh pr checks` exits 1 when a check failed and 8 while some are
-    /// pending; the JSON is valid either way.
-    pub fn pr_checks(&self, dir: &Path, number: u64) -> Result<Vec<Check>> {
-        let n = number.to_string();
-        let out = self.run(
-            dir,
-            &[
-                "pr",
-                "checks",
-                &n,
-                "--json",
-                "name,state,bucket,link,workflow,description",
-            ],
-        )?;
-        if out.stdout.iter().all(u8::is_ascii_whitespace) {
-            let message = out.message();
-            if message.contains("no checks reported") {
-                return Ok(Vec::new());
-            }
-            out.check()?;
-            return Ok(Vec::new());
-        }
-        out.json()
-    }
-
-    pub fn pr_diff(&self, dir: &Path, number: u64) -> Result<String> {
-        let n = number.to_string();
-        Ok(self
-            .run_ok(dir, &["pr", "diff", &n, "--color", "never"])?
-            .stdout_str())
-    }
-
-    pub fn pr_action(&self, dir: &Path, number: u64, action: &PrAction) -> Result<String> {
-        let n = number.to_string();
-        let args: Vec<&str> = match action {
-            PrAction::Checkout => vec!["pr", "checkout", &n],
-            PrAction::Ready => vec!["pr", "ready", &n],
-            PrAction::Close => vec!["pr", "close", &n],
-            PrAction::Merge(method) => vec!["pr", "merge", &n, method.flag()],
-        };
-        let cmd = self
-            .cmd(dir)
-            .args(args)
-            .timeout(Duration::from_secs(300))
-            .locked(dir);
-        let out = process::run(&cmd)?;
-        if out.success() {
-            Ok(out.message())
-        } else {
-            bail!("{}", out.message())
-        }
-    }
-
-    pub fn pr_create(&self, dir: &Path, new: &NewPr) -> Result<String> {
-        let mut cmd = self
-            .cmd(dir)
-            .args(["pr", "create", "--base", &new.base, "--title", &new.title])
-            .args(["--body", &new.body])
-            .timeout(Duration::from_secs(120));
-        if new.draft {
-            cmd = cmd.arg("--draft");
-        }
-        let out = process::run(&cmd)?;
-        if out.success() {
-            Ok(out.stdout_str().trim().to_owned())
-        } else {
-            bail!("{}", out.message())
-        }
-    }
-
-    pub fn run_list(&self, dir: &Path, branch: &str) -> Result<Vec<Run>> {
-        self.json(
-            dir,
-            &[
-                "run",
-                "list",
-                "--branch",
-                branch,
-                "--limit",
-                "20",
-                "--json",
-                RUN_FIELDS,
-            ],
-        )
-    }
-
-    pub fn run_view(&self, dir: &Path, id: u64) -> Result<RunDetail> {
-        let id = id.to_string();
-        self.json(dir, &["run", "view", &id, "--json", RUN_VIEW_FIELDS])
-    }
-
-    pub fn run_failed_log(&self, dir: &Path, id: u64) -> Result<String> {
-        let id = id.to_string();
-        let cmd = self
-            .cmd(dir)
-            .args(["run", "view", &id, "--log-failed"])
-            .timeout(Duration::from_secs(120));
-        Ok(process::run(&cmd)?.check()?.stdout_str())
-    }
-
-    pub fn run_rerun_failed(&self, dir: &Path, id: u64) -> Result<()> {
-        let id = id.to_string();
-        self.run_ok(dir, &["run", "rerun", &id, "--failed"]).map(drop)
-    }
-}
-
-pub const PR_LIST_FIELDS: &str =
-    "number,title,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt";
-pub const PR_VIEW_FIELDS: &str = "number,title,author,body,baseRefName,headRefName,isDraft,state,reviewDecision,url,reviews,comments,statusCheckRollup,additions,deletions,changedFiles";
-pub const RUN_FIELDS: &str =
-    "databaseId,displayTitle,status,conclusion,workflowName,event,headBranch,createdAt,url";
-pub const RUN_VIEW_FIELDS: &str =
-    "databaseId,displayTitle,status,conclusion,workflowName,headBranch,url,jobs";
-
-/// The first line of `gh --version`: "gh version 2.63.0 (2024-…)".
-pub fn parse_version(text: &str) -> String {
-    text.lines()
-        .next()
-        .and_then(|l| l.strip_prefix("gh version "))
-        .and_then(|l| l.split_whitespace().next())
-        .unwrap_or("")
-        .to_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -280,14 +55,6 @@ pub enum MergeMethod {
 }
 
 impl MergeMethod {
-    pub fn flag(self) -> &'static str {
-        match self {
-            Self::Merge => "--merge",
-            Self::Squash => "--squash",
-            Self::Rebase => "--rebase",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Merge => "Create a merge commit",
@@ -590,6 +357,7 @@ pub fn pr_text_from_commits(branch: &str, commits: &[(String, String)]) -> (Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn parses_pr_list() -> Result<()> {
@@ -658,7 +426,6 @@ mod tests {
 
     #[test]
     fn helpers() {
-        assert_eq!(parse_version("gh version 2.63.0 (2024-11-27)\nhttps://…"), "2.63.0");
         assert_eq!(log_tail("a\nb\nc", 2), "b\nc");
         assert!(is_rate_limited("HTTP 403: API rate limit exceeded"));
         assert_eq!(
@@ -672,31 +439,5 @@ mod tests {
         assert_eq!(t, "fix login");
         assert_eq!(b, "- One\n- Two");
         assert_eq!(PrFilter::ReviewRequested.search(), "is:open review-requested:@me");
-    }
-
-    #[test]
-    fn detect_with_fake_gh() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let fake = tmp.path().join("gh");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'gh version 9.9.9 (x)'; exit 0; fi\n\
-             if [ \"$1\" = auth ]; then echo 'not logged in' >&2; exit 1; fi\n",
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))?;
-        }
-        let gh = Gh::new(fake, None);
-        assert_eq!(
-            gh.detect(tmp.path()),
-            GhState::SignedOut {
-                version: "9.9.9".into()
-            }
-        );
-        let missing = Gh::new(tmp.path().join("nope"), None);
-        assert_eq!(missing.detect(tmp.path()), GhState::Missing);
-        Ok(())
     }
 }

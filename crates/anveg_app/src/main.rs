@@ -23,9 +23,11 @@ mod model;
 mod commands_view;
 mod project_commands;
 mod notes_panel;
+mod open_github;
 mod panes;
 mod platform;
 mod project_window;
+mod publish_view;
 mod settings_window;
 mod session_buttons_view;
 mod session_toolbar;
@@ -119,6 +121,8 @@ fn install_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.defer(request_quit));
     cx.on_action(|_: &OpenFolder, cx| windows::prompt_open_folder(cx));
     cx.on_action(|_: &OpenSettings, cx| settings_window::open(cx));
+    cx.on_action(|_: &OpenFromGitHub, cx| open_github::open(cx));
+    cx.on_action(|_: &PublishFolderToGitHub, cx| windows::prompt_publish_folder(cx));
     cx.on_action(|action: &OpenRecent, cx| {
         windows::open_project(action.project_id, None, Vec::new(), cx)
     });

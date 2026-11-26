@@ -23,6 +23,14 @@ tempfile.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
 similar.workspace = true
+ureq.workspace = true
+rustls.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
 
 [dev-dependencies]
 anyhow.workspace = true

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use anveg_core::claude_env::{self, ClaudeInfo, EnvMap};
 use anveg_core::config::{AppState, ProjectStore, Settings, WindowState};
 use anveg_core::fswatch::FsWatchService;
-use anveg_core::gh::{Gh, GhState};
+use anveg_core::github_api::{self, GitHub, Secret, Transport, UreqTransport};
+use anveg_core::github_auth::{self, KeychainStore, Poll, TokenStore};
 use anveg_core::git::Git;
 use anveg_core::paths::AppPaths;
 use anveg_core::status::{HookMessage, HookServer, hooks_settings};
@@ -46,10 +47,58 @@ pub enum ModelEvent {
     Hook(Box<HookMessage>),
     /// The number of sessions needing input changed somewhere.
     AttentionChanged,
-    /// Phase 6: `gh` was (re)detected.
-    GhChanged,
+    /// Signed in or out of GitHub (or the sign-in is still being checked).
+    GitHubChanged,
     /// A project window opened or closed (for the full-screen window tabs).
     WindowsChanged,
+}
+
+/// Signed in to GitHub or not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthState {
+    /// Reading the keychain and checking the token.
+    Checking,
+    SignedOut,
+    /// `login` is empty when GitHub could not be reached to check.
+    SignedIn { login: String },
+}
+
+/// A device-flow sign-in waiting for the user (empty code: still asking
+/// GitHub for one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceSignIn {
+    pub user_code: String,
+    pub verification_uri: String,
+}
+
+enum VerifyError {
+    /// 401: the token is wrong, expired or revoked.
+    Rejected(String),
+    /// Could not ask (offline, GitHub down).
+    Unreachable(String),
+}
+
+/// Who a token belongs to (`GET /user`).
+fn verify(transport: &Arc<dyn Transport>, token: Secret) -> Result<String, VerifyError> {
+    let api = github_api::Api::new(transport.clone(), Some(token));
+    match api.get::<github_api::User>("/user") {
+        Ok(u) => Ok(u.login),
+        Err(e) if github_api::is_signed_out(&e) => Err(VerifyError::Rejected(
+            "GitHub did not accept that token (wrong, expired or revoked).".into(),
+        )),
+        Err(e) if github_api::api_status(&e).is_some() => Err(VerifyError::Rejected(format!("{e:#}"))),
+        Err(e) => Err(VerifyError::Unreachable(format!("{e:#}"))),
+    }
+}
+
+/// The keychain entry's service: separate for development builds, so they
+/// never touch the installed app's sign-in.
+fn keychain_service() -> &'static str {
+    if cfg!(debug_assertions) {
+        "dev.anveg.code.dev.github"
+    } else {
+        "dev.anveg.code.github"
+    }
 }
 
 /// An open project window.
@@ -80,6 +129,8 @@ pub struct AppModel {
     pub windows: Vec<OpenWindow>,
     pub welcome: Option<AnyWindowHandle>,
     pub settings_window: Option<AnyWindowHandle>,
+    /// The Open from GitHub window, if open.
+    pub github_window: Option<AnyWindowHandle>,
     pub hooks: Option<HookSetup>,
     /// Set while quitting, so closing windows does not forget them.
     pub quitting: bool,
@@ -87,13 +138,20 @@ pub struct AppModel {
     pub fswatch: Option<Arc<FsWatchService>>,
     /// Phase 4: language servers.
     pub lsp: Entity<LspManager>,
-    /// Phase 5–6: `git` and `gh` on the captured `PATH`.
+    /// `git` on the captured `PATH`.
     pub git_path: Option<PathBuf>,
-    pub gh_path: Option<PathBuf>,
-    /// Phase 6: `None` until checked.
-    pub gh_state: Option<GhState>,
-    gh_checking: bool,
-    gh_checked_at: Option<Instant>,
+    /// GitHub: signed in or not (the token itself is in the keychain).
+    pub github_auth: AuthState,
+    github_token: Option<Secret>,
+    /// A device-flow sign-in in progress.
+    pub device_sign_in: Option<DeviceSignIn>,
+    /// The last sign-in problem, to show next to the sign-in buttons.
+    pub github_note: Option<String>,
+    transport: Arc<dyn Transport>,
+    token_store: Arc<dyn TokenStore>,
+    /// The `GIT_ASKPASS` script that hands git the token.
+    askpass_script: Option<PathBuf>,
+    device_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
     _hook_task: Option<Task<()>>,
 }
@@ -121,20 +179,26 @@ impl AppModel {
             windows: Vec::new(),
             welcome: None,
             settings_window: None,
+            github_window: None,
             hooks: None,
             quitting: false,
             fswatch,
             lsp,
             git_path: None,
-            gh_path: None,
-            gh_state: None,
-            gh_checking: false,
-            gh_checked_at: None,
+            github_auth: AuthState::Checking,
+            github_token: None,
+            device_sign_in: None,
+            github_note: None,
+            transport: Arc::new(UreqTransport::new()),
+            token_store: Arc::new(KeychainStore::new(keychain_service())),
+            askpass_script: None,
+            device_task: None,
             save_task: None,
             _hook_task: None,
         };
         this.start_hooks(cx);
         this.detect(cx);
+        this.load_github(cx);
         this
     }
 
@@ -157,78 +221,276 @@ impl AppModel {
             let info = claude_env::detect_claude(override_path.as_deref(), &env);
             let path_var = env.get("PATH").cloned();
             let git = claude_env::find_in_path("git", path_var.as_deref());
-            let gh = claude_env::find_in_path("gh", path_var.as_deref());
-            (env, info, git, gh)
+            (env, info, git)
         });
         cx.spawn(async move |this, cx| {
-            let (env, info, git, gh) = task.await;
+            let (env, info, git) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.child_env = Some(env);
                 this.claude = Some(info);
                 this.git_path = git;
-                this.gh_path = gh;
                 cx.emit(ModelEvent::ClaudeDetected);
-                this.check_gh(true, cx);
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// How to run git (the captured environment).
+    /// How to run git (the captured environment). While signed in to
+    /// GitHub, git's https prompts for github.com are answered with the token.
     pub fn git(&self) -> Git {
+        let askpass = match (&self.askpass_script, &self.github_token) {
+            (Some(script), Some(token)) => Some(anveg_core::git::Askpass {
+                script: script.clone(),
+                token: token.clone(),
+            }),
+            _ => None,
+        };
         Git::new(
             self.git_path.clone().unwrap_or_else(|| PathBuf::from("git")),
             self.child_env.clone(),
         )
+        .with_askpass(askpass)
     }
 
-    /// How to run gh, if it is installed.
-    pub fn gh(&self) -> Option<Gh> {
-        Some(Gh::new(self.gh_path.clone()?, self.child_env.clone()))
+    /// GitHub's API as the signed-in user, if signed in.
+    pub fn github(&self) -> Option<GitHub> {
+        let token = self.github_token.clone()?;
+        Some(GitHub::new(
+            github_api::Api::new(self.transport.clone(), Some(token)),
+            self.git(),
+        ))
     }
 
-    /// Run `gh --version` and `gh auth status` in the background. Without
-    /// `force`, only when the last check failed and was over 30 s ago (a
-    /// window gained focus).
-    pub fn check_gh(&mut self, force: bool, cx: &mut Context<Self>) {
-        if self.gh_checking || self.child_env.is_none() {
-            return;
+    pub fn is_signed_in(&self) -> bool {
+        matches!(self.github_auth, AuthState::SignedIn { .. })
+    }
+
+    fn set_auth(&mut self, auth: AuthState, cx: &mut Context<Self>) {
+        if self.github_auth != auth {
+            self.github_auth = auth;
+            cx.emit(ModelEvent::GitHubChanged);
         }
-        if !force {
-            let ready = matches!(self.gh_state, Some(GhState::Ready { .. }));
-            let recent = self
-                .gh_checked_at
-                .is_some_and(|t| t.elapsed() < Duration::from_secs(30));
-            if ready || recent {
-                return;
-            }
-            // `gh` may have been installed since: look on PATH again.
-            let path_var = self.child_env.as_ref().and_then(|e| e.get("PATH").cloned());
-            self.gh_path = claude_env::find_in_path("gh", path_var.as_deref());
-        }
-        let Some(gh) = self.gh() else {
-            self.gh_state = Some(GhState::Missing);
-            self.gh_checked_at = Some(Instant::now());
-            cx.emit(ModelEvent::GhChanged);
-            return;
-        };
-        self.gh_checking = true;
-        let dir = std::env::temp_dir();
-        let task = cx.background_spawn(async move { gh.detect(&dir) });
-        cx.spawn(async move |this, cx| {
-            let state = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.gh_checking = false;
-                this.gh_checked_at = Some(Instant::now());
-                if this.gh_state.as_ref() != Some(&state) {
-                    this.gh_state = Some(state);
-                    cx.emit(ModelEvent::GhChanged);
-                    cx.notify();
+        cx.notify();
+    }
+
+    /// At start: the token from the keychain, checked against GitHub.
+    fn load_github(&mut self, cx: &mut Context<Self>) {
+        let store = self.token_store.clone();
+        let transport = self.transport.clone();
+        let askpass_dir = self.paths.support_dir.clone();
+        let task = cx.background_spawn(async move {
+            let askpass = github_auth::write_askpass(&askpass_dir)
+                .map_err(|error| tracing::warn!(%error, "could not write the git askpass script"))
+                .ok();
+            let token = match store.get() {
+                Ok(t) => t,
+                Err(error) => {
+                    tracing::warn!(%error, "keychain");
+                    None
                 }
+            };
+            let login = token.clone().map(|t| verify(&transport, t));
+            (askpass, token, login)
+        });
+        cx.spawn(async move |this, cx| {
+            let (askpass, token, login) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.askpass_script = askpass;
+                this.apply_verified(token, login, false, cx);
             });
         })
         .detach();
+    }
+
+    /// Act on a token's check: signed in, signed out (revoked: forget it),
+    /// or GitHub unreachable (stay signed in, the token may well be fine).
+    fn apply_verified(
+        &mut self,
+        token: Option<Secret>,
+        login: Option<Result<String, VerifyError>>,
+        save: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match (token, login) {
+            (Some(token), Some(Ok(login))) => {
+                if save && let Err(e) = self.token_store.set(&token) {
+                    self.github_note = Some(format!("{e:#}"));
+                }
+                self.github_token = Some(token);
+                self.github_note = None;
+                self.set_auth(AuthState::SignedIn { login }, cx);
+            }
+            (Some(token), Some(Err(VerifyError::Unreachable(message)))) => {
+                tracing::info!(%message, "GitHub unreachable; keeping the saved token");
+                if save && let Err(e) = self.token_store.set(&token) {
+                    self.github_note = Some(format!("{e:#}"));
+                }
+                self.github_token = Some(token);
+                self.set_auth(AuthState::SignedIn { login: String::new() }, cx);
+            }
+            (Some(_), Some(Err(VerifyError::Rejected(message)))) => {
+                if !save {
+                    let _ = self.token_store.delete();
+                }
+                self.github_token = None;
+                self.github_note = Some(message);
+                self.set_auth(AuthState::SignedOut, cx);
+            }
+            _ => {
+                self.github_token = None;
+                self.set_auth(AuthState::SignedOut, cx);
+            }
+        }
+    }
+
+    /// Settings: a pasted personal access token.
+    pub fn sign_in_with_token(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(token) = github_auth::clean_token(text) else {
+            self.github_note = Some("That does not look like a GitHub token.".into());
+            cx.notify();
+            return;
+        };
+        self.github_note = None;
+        self.set_auth(AuthState::Checking, cx);
+        let transport = self.transport.clone();
+        let t = token.clone();
+        let task = cx.background_spawn(async move { verify(&transport, t) });
+        cx.spawn(async move |this, cx| {
+            let login = task.await;
+            let _ = this.update(cx, |this, cx| this.apply_verified(Some(token), Some(login), true, cx));
+        })
+        .detach();
+    }
+
+    /// The OAuth App's client ID: Settings, else `ANVEG_GITHUB_CLIENT_ID`
+    /// (at run time, or baked in at build time).
+    pub fn github_client_id(&self) -> Option<String> {
+        self.settings
+            .github_client_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("ANVEG_GITHUB_CLIENT_ID").ok().filter(|s| !s.is_empty()))
+            .or_else(|| option_env!("ANVEG_GITHUB_CLIENT_ID").map(str::to_owned))
+            .map(|s| s.trim().to_owned())
+    }
+
+    /// "Sign in with GitHub": show a code, open github.com/login/device,
+    /// and wait for the user to approve.
+    pub fn start_device_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(client_id) = self.github_client_id() else {
+            self.github_note = Some(
+                "Signing in through the browser needs the OAuth App's client ID (Settings ▸ GitHub). \
+                 You can paste a personal access token instead."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        self.github_note = None;
+        let transport = self.transport.clone();
+        self.device_sign_in = Some(DeviceSignIn {
+            user_code: String::new(),
+            verification_uri: String::new(),
+        });
+        cx.notify();
+        self.device_task = Some(cx.spawn(async move |this, cx| {
+            let t = transport.clone();
+            let id = client_id.clone();
+            let code = cx
+                .background_spawn(async move { github_auth::request_device_code(t.as_ref(), &id) })
+                .await;
+            let code = match code {
+                Ok(code) => code,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.device_sign_in = None;
+                        this.github_note = Some(format!("{e:#}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.device_sign_in = Some(DeviceSignIn {
+                    user_code: code.user_code.clone(),
+                    verification_uri: code.verification_uri.clone(),
+                });
+                cx.open_url(&code.verification_uri);
+                cx.notify();
+            });
+            let mut interval = code.interval.max(1);
+            let deadline = Instant::now() + Duration::from_secs(code.expires_in.max(60));
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(interval))
+                    .await;
+                if Instant::now() > deadline {
+                    let _ = this.update(cx, |this, cx| {
+                        this.device_sign_in = None;
+                        this.github_note = Some("The sign-in code expired. Try again.".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+                let (t, id, dc) = (transport.clone(), client_id.clone(), code.device_code.clone());
+                let poll = cx
+                    .background_spawn(async move { github_auth::poll_device_token(t.as_ref(), &id, &dc) })
+                    .await;
+                match poll {
+                    Poll::Pending => {}
+                    Poll::SlowDown => interval += 5,
+                    Poll::Token(token) => {
+                        let t = transport.clone();
+                        let tok = token.clone();
+                        let login = cx.background_spawn(async move { verify(&t, tok) }).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.device_sign_in = None;
+                            this.apply_verified(Some(token), Some(login), true, cx);
+                        });
+                        return;
+                    }
+                    other => {
+                        let message = match other {
+                            Poll::Denied => "The sign-in was cancelled on GitHub.".to_owned(),
+                            Poll::Expired => "The sign-in code expired. Try again.".to_owned(),
+                            Poll::Failed(m) => m,
+                            _ => String::new(),
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            this.device_sign_in = None;
+                            this.github_note = Some(message);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+
+    pub fn cancel_device_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.device_task = None;
+        self.device_sign_in = None;
+        cx.notify();
+    }
+
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.token_store.delete() {
+            self.github_note = Some(format!("{e:#}"));
+        }
+        self.github_token = None;
+        self.device_task = None;
+        self.device_sign_in = None;
+        self.set_auth(AuthState::SignedOut, cx);
+    }
+
+    /// A GitHub call answered 401: the token was revoked or expired.
+    pub fn github_rejected(&mut self, cx: &mut Context<Self>) {
+        let _ = self.token_store.delete();
+        self.github_token = None;
+        self.github_note = Some("GitHub no longer accepts the saved sign-in. Sign in again.".into());
+        self.set_auth(AuthState::SignedOut, cx);
     }
 
     /// Whether `claude` was found and runs.

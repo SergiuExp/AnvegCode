@@ -161,15 +161,31 @@ impl Render for Welcome {
                         )
                     })
                     .child(
-                        div().flex().child(
-                            Button::new("welcome-open")
-                                .primary()
-                                .label("Open Project…")
-                                .tooltip("⌘O")
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(OpenFolder), cx)
-                                }),
-                        ),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("welcome-open")
+                                    .primary()
+                                    .label("Open Project…")
+                                    .tooltip("⌘O")
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(OpenFolder), cx)
+                                    }),
+                            )
+                            .child(
+                                Button::new("welcome-github")
+                                    .outline()
+                                    .label("Open from GitHub…")
+                                    .on_click(|_, _, cx| crate::open_github::open(cx)),
+                            )
+                            .child(
+                                Button::new("welcome-publish")
+                                    .outline()
+                                    .label("Publish a Folder to GitHub…")
+                                    .on_click(|_, _, cx| crate::windows::prompt_publish_folder(cx)),
+                            ),
                     )
                     .child(
                         div()

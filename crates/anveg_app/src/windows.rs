@@ -122,6 +122,41 @@ pub fn open_folder(folder: PathBuf, cx: &mut App) {
     }
 }
 
+/// Welcome ▸ Publish a Folder to GitHub: pick a folder, open it as a
+/// project, and show its Publish to GitHub tab.
+pub fn prompt_publish_folder(cx: &mut App) {
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some("Publish".into()),
+    });
+    cx.spawn(async move |cx| {
+        if let Ok(Ok(Some(paths))) = rx.await
+            && let Some(folder) = paths.into_iter().next()
+        {
+            cx.update(|cx| {
+                open_folder(folder.clone(), cx);
+                // The window opened (or came forward) for that folder.
+                let m = model(cx);
+                let target = m.read(cx).windows.iter().find_map(|w| {
+                    let p = m.read(cx).projects.get(w.project_id)?;
+                    crate::editor_view::same_file(&p.main_folder, &folder)
+                        .then(|| (w.handle, w.view.clone()))
+                });
+                if let Some((handle, view)) = target {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = view.update(cx, |v, cx| {
+                            v.open_doc(anveg_core::config::DocKey::PublishToGitHub, window, cx)
+                        });
+                    });
+                }
+            });
+        }
+    })
+    .detach();
+}
+
 /// ⌘O: pick a folder.
 pub fn prompt_open_folder(cx: &mut App) {
     let rx = cx.prompt_for_paths(PathPromptOptions {

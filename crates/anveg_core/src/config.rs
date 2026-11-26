@@ -77,6 +77,9 @@ pub struct Settings {
     pub finish_sound: FinishSound,
     /// Diffs side by side (before | after) rather than in one column.
     pub diff_split: bool,
+    /// The GitHub OAuth App's client ID, for "Sign in with GitHub" (the
+    /// device flow). Not a secret. Without one, sign in with a token.
+    pub github_client_id: Option<String>,
 }
 
 /// When to play the chime as Claude finishes a turn.
@@ -158,6 +161,7 @@ impl Default for Settings {
             session_buttons: Vec::new(),
             finish_sound: FinishSound::default(),
             diff_split: true,
+            github_client_id: None,
         }
     }
 }
@@ -412,6 +416,8 @@ pub enum DocKey {
         id: String,
         title: String,
     },
+    /// Publish the project to a new GitHub repository (not restored).
+    PublishToGitHub,
     /// The project's toolbar commands editor.
     Commands,
     /// The editor for the custom buttons above Claude sessions (global).
@@ -430,7 +436,10 @@ pub enum DocKey {
 impl DocKey {
     /// Whether this tab comes back after a restart.
     pub fn restorable(&self) -> bool {
-        !matches!(self, Self::Compare { .. } | Self::ActivityDetails { .. })
+        !matches!(
+            self,
+            Self::Compare { .. } | Self::ActivityDetails { .. } | Self::PublishToGitHub
+        )
     }
 }
 

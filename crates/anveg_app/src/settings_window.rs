@@ -28,6 +28,8 @@ enum Field {
     Lsp(&'static str),
     /// Phase 4: extra file types ("tpl=html, jsonl=json").
     FileTypes,
+    /// The GitHub OAuth App's client ID (Sign in with GitHub).
+    GitHubClientId,
 }
 
 /// The languages with a server command in Settings ▸ Editor.
@@ -42,6 +44,8 @@ const LSP_LANGUAGES: [(&str, &str); 5] = [
 pub struct SettingsWindow {
     model: Entity<AppModel>,
     fields: Vec<(Field, Entity<InputState>)>,
+    /// A personal access token being pasted (never saved to a file).
+    token: Entity<InputState>,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -99,6 +103,7 @@ fn field_value(field: Field, s: &Settings) -> String {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(", "),
+        Field::GitHubClientId => s.github_client_id.clone().unwrap_or_default(),
     }
 }
 
@@ -116,6 +121,7 @@ impl SettingsWindow {
             Field::Scrollback,
             Field::IdleMinutes,
             Field::FileTypes,
+            Field::GitHubClientId,
         ]
         .into_iter()
         .chain(LSP_LANGUAGES.iter().map(|(l, _)| Field::Lsp(l)));
@@ -126,6 +132,7 @@ impl SettingsWindow {
                 Field::DefaultFlags => "e.g. --permission-mode plan",
                 Field::Lsp(_) => "Empty turns it off",
                 Field::FileTypes => "e.g. tpl=html, jsonl=json",
+                Field::GitHubClientId => "e.g. Ov23li…",
                 _ => "",
             };
             let input = cx.new(|cx| {
@@ -142,9 +149,20 @@ impl SettingsWindow {
             );
             fields.push((field, input));
         }
+        let token = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("ghp_… or github_pat_…")
+        });
+        subscriptions.push(cx.subscribe_in(&token, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_token(window, cx);
+            }
+        }));
         Self {
             model,
             fields,
+            token,
             error: None,
             _subscriptions: subscriptions,
         }
@@ -155,6 +173,79 @@ impl SettingsWindow {
             .iter()
             .find(|(f, _)| *f == field)
             .map(|(_, i)| i)
+    }
+
+    fn save_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.token.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.model.update(cx, |m, cx| m.sign_in_with_token(&text, cx));
+        // The field does not keep the token.
+        self.token.update(cx, |s, cx| s.set_value("", window, cx));
+    }
+
+    fn render_github(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let auth = self.model.read(cx).github_auth.clone();
+        let mut col = div().flex().flex_col().gap_2();
+        match auth {
+            crate::model::AuthState::SignedIn { login } => {
+                col = col.child(self.row(
+                    "Signed in",
+                    Some("The token is kept in the macOS Keychain. git uses it for https remotes on github.com."),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().child(if login.is_empty() {
+                            "(GitHub unreachable)".to_owned()
+                        } else {
+                            format!("as {login}")
+                        }))
+                        .child(
+                            Button::new("gh-sign-out")
+                                .outline()
+                                .size(ButtonSize::Sm)
+                                .label("Sign Out")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.model.update(cx, |m, cx| m.sign_out(cx))
+                                })),
+                        )
+                        .into_any_element(),
+                    cx,
+                ));
+            }
+            _ => {
+                col = col
+                    .child(crate::github::sign_in_panel("settings", cx))
+                    .child(self.row(
+                        "Personal access token",
+                        Some("Classic token with the repo, read:org and workflow scopes, or a fine-grained one. Saved in the Keychain."),
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.token)))
+                            .child(
+                                Button::new("gh-save-token")
+                                    .outline()
+                                    .size(ButtonSize::Sm)
+                                    .label("Save")
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_token(window, cx))),
+                            )
+                            .into_any_element(),
+                        cx,
+                    ));
+            }
+        }
+        col.child(self.row(
+            "OAuth App client ID",
+            Some("For Sign in with GitHub: an OAuth App with Device Flow enabled. Not a secret."),
+            self.text(Field::GitHubClientId),
+            cx,
+        ))
+        .into_any_element()
     }
 
     fn apply(&mut self, field: Field, cx: &mut Context<Self>) {
@@ -209,6 +300,10 @@ impl SettingsWindow {
                     next.lsp_servers.insert(lang.to_owned(), text.clone());
                 })
                 .map_err(|e| format!("Language server command: {e}")),
+            Field::GitHubClientId => {
+                next.github_client_id = (!text.is_empty()).then(|| text.clone());
+                Ok(())
+            }
             Field::FileTypes => {
                 let mut map = std::collections::BTreeMap::new();
                 let mut bad = None;
@@ -434,6 +529,8 @@ impl Render for SettingsWindow {
                     .children(LSP_LANGUAGES.iter().map(|(lang, label)| {
                         self.row(label, None, self.text(Field::Lsp(lang)), cx)
                     }))
+                    .child(section("GitHub"))
+                    .child(self.render_github(cx))
                     .child(section("Git"))
                     .child(self.row(
                         "Pull",

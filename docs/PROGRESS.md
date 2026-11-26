@@ -882,3 +882,93 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] Pull a teammate's work: "Pulled N commits…", with the files.
 
 **Follow-up (2026-11-26): clearer failures, with details.** The owner found the raw git error in Git ▸ Activity unclear. A failed entry now shows the failure in plain words and what to do (`git_activity::explain`): the remote has commits you don't have (pull first), the remote refused the push, git could not sign in, the remote was not found, the remote could not be reached, git took too long, the branches diverged, uncommitted changes are in the way, the pull stopped with conflicts, the branch has no upstream, nothing to push, no remote; anything else shows git's own first error line. Clicking it (or "Details…" on any entry) opens a tab with the explanation, the command that ran (now recorded with each entry), repository, branch, time (UTC and relative), what moved, and git's full output as selectable text, with **Copy Output** and **Run in Terminal** (the same command, `git -C <repo> …`, e.g. to sign in interactively). Details tabs are not restored after a restart. Verified under Xvfb with the rejected push from the earlier test; unit tests cover the explanations.
+
+---
+
+## GitHub through its API (no `gh`), sign-in, Publish and Open from GitHub (owner's request, 2026-11-26)
+
+**Done — API client (`anveg_core::github_api`)**
+- Blocking HTTP with `ureq` 3.5 over rustls (ring provider). Certificates are checked against the operating system's trust store (`rustls-platform-verifier`), so no root list ships and corporate CAs work. `HTTPS_PROXY` is honoured. Redirects are followed, and the token is dropped when one leaves the host (CI log downloads). Pinned: `ureq =3.5.2`, `rustls =0.23.46`, `keyring =3.6.3`. No new licence was needed (`cargo deny`).
+- Headers: `Authorization: Bearer`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `User-Agent: AnvegCode`.
+- Paging follows `Link: rel="next"` up to a limit.
+- Errors:
+  - 401 → `SignedOut` (the app signs out and asks again);
+  - 403 with `x-ratelimit-remaining: 0` / `retry-after` / "rate limit", and 429 → the existing `RateLimited` (with "try again in about N min");
+  - 404 → an explanation;
+  - 422 and others → GitHub's message plus its `errors[]`.
+- The network sits behind a `Transport` trait; tests use a fake.
+- Every `gh` operation is re-implemented, keeping the public types in `gh.rs` (the CLI parts are gone), so `github.rs` barely changed:
+  - repo info, runs, run detail + jobs, failed-job logs, re-run failed jobs, pull request checks (check runs + commit statuses mapped to gh's buckets), the diff (`application/vnd.github.diff`), merge, close and create are REST;
+  - the pull request **list and details** are one **GraphQL** query each: REST has no review decision or check roll-up, which would cost two or three more requests per pull request. "Ready for review" also uses GraphQL, since REST has no endpoint for it;
+  - **Checkout** uses git: fetch the head branch and switch with tracking, or `refs/pull/N/head` → `pr-N-<branch>` for forks.
+- The repository comes from the `origin` remote, else the first GitHub remote, read as configured (`remote.<name>.url`, before any `insteadOf` rewriting). https, `git@`, `ssh://` and `git://` forms are parsed; other hosts are not GitHub.
+
+**Done — sign-in (`anveg_core::github_auth`, `model.rs`)**
+- `GhState`/`gh_path` detection is replaced by `AuthState { Checking, SignedOut, SignedIn { login } }`. At start the token is read from the keychain and checked with `GET /user`:
+  - rejected → signed out, and the token is forgotten;
+  - GitHub unreachable → stays signed in.
+- **Sign in with GitHub:** the OAuth device flow (`github.com/login/device/code`, then polling `/login/oauth/access_token` with `slow_down`, denied and expired handled). It shows the code with Copy, opens the verification URL, and can be cancelled. Scopes: `repo read:org workflow`. The client ID comes from Settings ▸ GitHub (`github_client_id`), else `ANVEG_GITHUB_CLIENT_ID` at run or build time; without one, the button explains and offers the token route.
+- **Personal access token** pasted in Settings ▸ GitHub (masked field, cleared after saving; checked before it is kept). **Sign Out** deletes it.
+- The token lives only in the **macOS Keychain** (`keyring`, service `dev.anveg.code.github`, `…dev.github` for debug builds). It never goes to a file, the log or a command line: `Secret` prints as `Secret(…)`.
+- **git uses it:** while signed in, every git command the app runs gets `GIT_ASKPASS` (a small script in the app data folder that answers only github.com prompts, `x-access-token` plus the token from `ANVEG_GIT_TOKEN`). Pushing, pulling, fetching and cloning over https need no separate login; your own credential helper still comes first.
+- The GitHub tab, PR and run tabs, Publish and Open from GitHub show a sign-in panel when signed out.
+
+**Done — Publish to GitHub** (File menu, the GitHub tab when the project has no repository or no GitHub remote, and the welcome window's "Publish a Folder to GitHub…", which picks a folder, opens it and shows this tab)
+- Name (from the folder, made GitHub-safe), description, private (default) or public, owner (you or one of your organizations from `GET /user/orgs`).
+- Checks first, changing nothing on failure:
+  - the folder must not be inside another repository;
+  - `origin` must not exist; if it does, it stops and says how to rename it;
+  - with no commits, it **asks** before committing all files ("Initial commit").
+- Then: `POST /user/repos` or `/orgs/{org}/repos` (`auto_init: false`), `git init` if needed, the first commit, `git remote add origin <https URL>`, and `git push -u origin HEAD`. The push goes into the Git activity log.
+- 422 "already exists" → "A repository named “x” already exists in your account. Choose another name." If the repository was created but a later step failed, the message says so and what to do.
+
+**Done — Open from GitHub** (File menu and the welcome window)
+- A window listing your repositories (`GET /user/repos`, sorted by updated, paged), with a filter and a field for any owner/repo or URL.
+- Clone… asks for a parent folder (native picker). The target is `<parent>/<name>`, refused if it exists and is not empty.
+- `git clone --progress` runs with progress and **Cancel** (a cancelled clone's partial folder is removed). Then the folder opens as a project and the window closes.
+
+**Removed:** the `gh` binary dependency (detection, `gh auth login` hints, `scripts/fake-gh`). Nothing in the code runs `gh`.
+
+**Fixed on the way:**
+- The Git panel now looks for repositories again when it has none, without looping, so it notices a fresh `git init`.
+- The GitHub tab re-checks when it does not know the GitHub repository yet, for example right after a remote is added.
+
+**Tests:**
+- Remote URL → owner/repo, and pasted slugs.
+- Link-header pagination: follows `next` and stops at the limit.
+- Error mapping: 401, 403 rate limit vs. no permission, 429, 404, 422 with `errors[]`.
+- Request headers.
+- JSON fixtures for every parsed type (GraphQL PR list/detail and errors, check runs, statuses, runs, jobs, repos, pulls).
+- A run list resolved through a real repository's `origin`.
+- The device flow (request body encoding, every poll answer).
+- Token cleaning and storage (memory store).
+- The askpass script answers only github.com.
+- Publish prechecks: not a repo, no commits, existing origin, nested folder.
+- Names and clone targets.
+- `clone_repo`, and a cancelled clone.
+- The token never appears in a command line or debug output.
+
+**Verified under Xvfb** against a fake GitHub API: a Python server on localhost (debug builds read `ANVEG_GITHUB_API`) plus `url.<dir>.insteadOf https://github.com/` in the test HOME, so pushes and clones ran for real against local bare repositories, with `gh` removed from `PATH`:
+- signed-out panels;
+- "Sign in with GitHub" without a client ID (explained);
+- token sign-in ("Signed in as tester");
+- Publish of a plain folder:
+  - the taken name (clear 422 message, folder untouched);
+  - the first-commit question;
+  - published, with `origin` set and `main` tracking `origin/main`;
+- the GitHub tab then listing pull request #7 (✓ checks, "Review required") and a failed CI run through the API;
+- Open from GitHub from the welcome window: the list, the filter, selection, and a clone opened as a project (the folder picker is answered by the debug-only `ANVEG_PICK_FOLDER` under Xvfb).
+
+**Not verified here:**
+- The device flow against github.com (needs the OAuth App's client ID).
+- The macOS Keychain. On Linux the development backend keeps the token only for the login session, so the Xvfb runs had to sign in after each restart.
+- The native folder picker.
+
+**Manual checks (Mac)**
+- [ ] Settings ▸ GitHub: enter the OAuth App client ID; GitHub tab ▸ Sign in with GitHub; approve in the browser; "Signed in as …". Quit and relaunch: still signed in.
+- [ ] Sign Out, then paste a token: signed in again.
+- [ ] GitHub tab: pull requests (checks icons, review state), CI runs, a PR's details, checks and diff, Merge/Close/Ready/Checkout, a failed run's log, Re-run.
+- [ ] Push/pull an https github.com remote without any other credential helper: no prompt.
+- [ ] File ▸ Publish to GitHub… on a folder that is not a repository: asks about the first commit, then the repository appears on GitHub with the code.
+- [ ] File ▸ Open from GitHub…: pick a private repository, choose a folder, watch the progress, Cancel once, then clone and open.
+- [ ] `which gh` absent: everything above still works.
