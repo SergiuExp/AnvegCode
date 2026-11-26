@@ -1475,6 +1475,10 @@ impl CreatePrView {
         let repo = self.repo.clone();
         self.busy = Some("Pushing the branch and creating the pull request…".into());
         cx.notify();
+        // The push, if any, goes into the Git activity log.
+        let pushed: std::sync::Arc<std::sync::Mutex<Option<anveg_core::git_activity::Entry>>> =
+            Default::default();
+        let pushed_in = pushed.clone();
         let task = cx.background_spawn(async move {
             // Push first when the branch is not published or has new commits.
             let status = git.status(&repo)?;
@@ -1495,7 +1499,12 @@ impl CreatePrView {
                 None
             };
             if let Some(op) = op {
-                git.network(&repo, &op, &CancelToken::new(), None)?;
+                let (result, entry) =
+                    anveg_core::git_activity::run_logged(&git, &repo, &op, &CancelToken::new(), None);
+                if let Ok(mut slot) = pushed_in.lock() {
+                    *slot = Some(entry);
+                }
+                result?;
             }
             gh.pr_create(&repo, &new)
         });
@@ -1504,6 +1513,9 @@ impl CreatePrView {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = None;
+                if let Some(entry) = pushed.lock().ok().and_then(|mut e| e.take()) {
+                    cx.emit(WorkspaceEvent::GitActivity(Box::new(entry)));
+                }
                 match result {
                     Ok(url) => {
                         cx.emit(WorkspaceEvent::Toast(format!("Created {url}").into()));

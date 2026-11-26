@@ -12,6 +12,7 @@ use std::time::Duration;
 use anveg_core::config::DocKey;
 use anveg_core::fswatch;
 use anveg_core::gh::{Run, RunState};
+use anveg_core::git_activity::{self, ActivityFile, Entry as Activity, RefChange};
 use anveg_core::git::{
     self, Branch, Change, Commit, DeleteError, DiffKind, NetworkOp, Section, Stash, StashOp,
     Status, StatusEntry, Worktree,
@@ -59,11 +60,25 @@ pub struct GitStore {
     pub last_refresh_ms: u128,
     watches: Vec<fswatch::Subscription>,
     debounce: Option<Task<()>>,
+    /// The Git activity log (pushes, pulls, fetches), oldest first.
+    pub activity: Vec<Activity>,
     _tasks: Vec<Task<()>>,
 }
 
 impl GitStore {
-    pub fn new(project: Uuid, _cx: &mut Context<Self>) -> Self {
+    pub fn new(project: Uuid, cx: &mut Context<Self>) -> Self {
+        let path = model(cx).read(cx).paths.activity_file(&project.to_string());
+        let load = cx.background_spawn(async move { ActivityFile::load(&path) });
+        let loaded = cx.spawn(async move |this, cx| {
+            let file = load.await;
+            let _ = this.update(cx, |s, cx| {
+                // Entries added while it loaded are newer.
+                let mut all = file.entries;
+                all.append(&mut s.activity);
+                s.activity = all;
+                cx.notify();
+            });
+        });
         Self {
             project,
             repos: Vec::new(),
@@ -74,8 +89,27 @@ impl GitStore {
             last_refresh_ms: 0,
             watches: Vec::new(),
             debounce: None,
-            _tasks: Vec::new(),
+            activity: Vec::new(),
+            _tasks: vec![loaded],
         }
+    }
+
+    /// Add a push, pull or fetch to the activity log and save it.
+    pub fn add_activity(&mut self, entry: Activity, cx: &mut Context<Self>) {
+        self.activity.push(entry);
+        let extra = self.activity.len().saturating_sub(git_activity::MAX_ENTRIES);
+        self.activity.drain(..extra);
+        let file = ActivityFile {
+            entries: self.activity.clone(),
+        };
+        let path = model(cx).read(cx).paths.activity_file(&self.project.to_string());
+        cx.background_spawn(async move {
+            if let Err(error) = file.save(&path) {
+                tracing::warn!(%error, "could not save the git activity log");
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     fn roots(&self, cx: &App) -> Vec<PathBuf> {
@@ -299,6 +333,7 @@ enum View {
     Branches,
     History,
     Stash,
+    Activity,
 }
 
 struct NetworkJob {
@@ -642,7 +677,9 @@ impl GitPanel {
             let _ = tx.unbounded_send(line.to_owned());
         });
         let root = repo.root.clone();
-        let task = cx.background_spawn(async move { git.network(&root, &op, &cancel, Some(progress)) });
+        let task = cx.background_spawn(async move {
+            git_activity::run_logged(&git, &root, &op, &cancel, Some(progress))
+        });
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
             while let Some(line) = rx.next().await {
                 let _ = this.update(cx, |this, cx| {
@@ -654,11 +691,15 @@ impl GitPanel {
             }
         }));
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
+            let (result, entry) = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.network = None;
+                let summary = activity_summary(&entry);
+                this.store.update(cx, |s, cx| s.add_activity(entry, cx));
                 match result {
-                    Ok(_) => cx.emit(WorkspaceEvent::Toast(format!("{label} finished.").into())),
+                    Ok(_) => cx.emit(WorkspaceEvent::Toast(
+                        format!("{label} finished: {summary}. See Git ▸ Activity.").into(),
+                    )),
                     Err(e) if anveg_core::process::is_cancelled(&e) => {
                         cx.emit(WorkspaceEvent::Toast(format!("{label} cancelled.").into()))
                     }
@@ -710,6 +751,7 @@ impl GitPanel {
                     });
                 }));
             }
+            View::Activity => {}
             View::Stash => {
                 let task = cx.background_spawn(async move { git.stashes(&root) });
                 self._tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -1055,12 +1097,13 @@ impl GitPanel {
     }
 
     fn render_views(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut row = div().flex().gap_0p5().px_1().py_0p5();
+        let mut row = div().flex().flex_wrap().gap_0p5().px_1().py_0p5();
         for (view, label) in [
             (View::Changes, "Changes"),
             (View::Branches, "Branches"),
             (View::History, "History"),
             (View::Stash, "Stash"),
+            (View::Activity, "Activity"),
         ] {
             row = row.child(
                 Button::new(SharedString::from(format!("gv-{label}")))
@@ -1466,6 +1509,251 @@ impl GitPanel {
             .into_any_element()
     }
 
+    fn render_activity(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let now = now_millis();
+        let entries: Vec<Activity> = self.store.read(cx).activity.iter().rev().cloned().collect();
+        let mut list = div().flex().flex_col();
+        if entries.is_empty() {
+            return list
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .text_color(c.muted_foreground)
+                        .child("Pushes, pulls and fetches made here appear here, with what they sent and received."),
+                )
+                .into_any_element();
+        }
+        for (i, e) in entries.into_iter().enumerate() {
+            let arrow = match e.op {
+                git_activity::Op::Push => "↑",
+                git_activity::Op::Pull => "↓",
+                git_activity::Op::Fetch => "⟳",
+            };
+            let repo_name = e
+                .repo
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut card = div()
+                .id(SharedString::from(format!("act-{i}")))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_2()
+                .py_1p5()
+                .border_b_1()
+                .border_color(c.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_sm()
+                        .child(div().w(px(14.)).child(arrow))
+                        .child(e.op.label())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .truncate()
+                                .child(match &e.branch {
+                                    Some(b) => format!("{repo_name} · {b}"),
+                                    None => repo_name.clone(),
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if e.ok { c.muted_foreground } else { c.destructive })
+                                .child(if e.ok {
+                                    relative(e.time, now)
+                                } else {
+                                    format!("failed · {}", relative(e.time, now))
+                                }),
+                        ),
+                );
+            // A pull that brought the branch to where the remote branch
+            // moved shows once: "Pulled … from origin/x into x".
+            let pulled_from = e.local.as_ref().and_then(|l| {
+                e.received
+                    .iter()
+                    .find(|r| r.old == l.old && r.new == l.new)
+                    .map(|r| r.name.clone())
+            });
+            let mut changes: Vec<(String, &RefChange)> = Vec::new();
+            for r in &e.sent {
+                changes.push((ref_change_line("Sent", r, None), r));
+            }
+            for r in &e.received {
+                if pulled_from.as_deref() == Some(r.name.as_str()) {
+                    continue;
+                }
+                changes.push((ref_change_line("Received", r, None), r));
+            }
+            if let Some(l) = &e.local {
+                changes.push((ref_change_line("Updated", l, pulled_from.as_deref()), l));
+            }
+            if changes.is_empty() && e.ok {
+                card = card.child(
+                    div()
+                        .pl(px(18.))
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(match e.op {
+                            git_activity::Op::Push => "Nothing to send: the remote was up to date.",
+                            _ => "Nothing new: already up to date.",
+                        }),
+                );
+            }
+            for (j, (line, change)) in changes.into_iter().enumerate() {
+                card = card.child(self.render_ref_change(&e.repo, line, change, (i, j), cx));
+            }
+            if !e.ok && !e.message.is_empty() {
+                let text: String = e.message.lines().take(4).collect::<Vec<_>>().join("\n");
+                card = card.child(
+                    div()
+                        .pl(px(18.))
+                        .text_xs()
+                        .text_color(c.destructive)
+                        .child(text),
+                );
+            }
+            list = list.child(card);
+        }
+        list.into_any_element()
+    }
+
+    fn render_ref_change(
+        &self,
+        repo: &Path,
+        line: String,
+        r: &RefChange,
+        ids: (usize, usize),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = Colors::of(cx);
+        let n = r.commits.len();
+        let short = |s: &Option<String>| s.as_deref().map(|s| s[..s.len().min(7)].to_owned());
+        let range = match (short(&r.old), short(&r.new)) {
+            (Some(a), Some(b)) => format!("{a}..{b}"),
+            (None, Some(b)) => b,
+            (Some(a), None) => a,
+            (None, None) => String::new(),
+        };
+        let diff_key = match (&r.old, &r.new) {
+            (Some(from), Some(to)) => Some(DocKey::RangeDiff {
+                repo: repo.to_path_buf(),
+                from: from.clone(),
+                to: to.clone(),
+                title: format!("{} {range}", r.name),
+            }),
+            _ => None,
+        };
+        let (i, j) = ids;
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .pl(px(18.))
+            .child(div().text_xs().child(line))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .child(div().text_color(c.muted_foreground).child(range))
+                    .child(div().flex_1())
+                    .when_some(diff_key.clone(), |el, key| {
+                        el.child(
+                            Button::new(SharedString::from(format!("act-diff-{i}-{j}")))
+                                .ghost()
+                                .size(ButtonSize::Xs)
+                                .label("Changes")
+                                .tooltip("Before → after, side by side")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(WorkspaceEvent::OpenDoc(key.clone()))
+                                })),
+                        )
+                    }),
+            );
+        for (k, commit) in r.commits.iter().take(5).enumerate() {
+            let key = DocKey::Commit {
+                repo: repo.to_path_buf(),
+                sha: commit.sha.clone(),
+                title: commit.summary.clone(),
+            };
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("act-c-{i}-{j}-{k}")))
+                    .flex()
+                    .gap_1()
+                    .text_xs()
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(|el| el.bg(c.accent.opacity(0.5)))
+                    .child(
+                        div()
+                            .text_color(c.muted_foreground)
+                            .child(commit.sha[..commit.sha.len().min(7)].to_owned()),
+                    )
+                    .child(div().truncate().child(commit.summary.clone()))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(WorkspaceEvent::OpenDoc(key.clone()))
+                    })),
+            );
+        }
+        if n > 5 || r.more_commits > 0 {
+            block = block.child(
+                div()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(format!("and {} more", if r.more_commits > 0 { "many".to_owned() } else { (n - 5).to_string() })),
+            );
+        }
+        if !r.files.is_empty() {
+            let shown: Vec<String> = r
+                .files
+                .iter()
+                .take(6)
+                .map(|f| format!("{} {}", f.status, f.path))
+                .collect();
+            let more = r.files.len().saturating_sub(6) + r.more_files;
+            let mut files = div().flex().flex_col().pt_0p5();
+            for (k, text) in shown.into_iter().enumerate() {
+                let key = diff_key.clone();
+                files = files.child(
+                    div()
+                        .id(SharedString::from(format!("act-f-{i}-{j}-{k}")))
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .truncate()
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(c.foreground))
+                        .child(text)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(key) = key.clone() {
+                                cx.emit(WorkspaceEvent::OpenDoc(key));
+                            }
+                        })),
+                );
+            }
+            if more > 0 {
+                files = files.child(
+                    div()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(format!("and {more} more files")),
+                );
+            }
+            block = block.child(files);
+        }
+        block.into_any_element()
+    }
+
     fn render_stash(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let c = Colors::of(cx);
         let now = now_millis();
@@ -1581,6 +1869,7 @@ impl Render for GitPanel {
             View::Branches => self.render_branches(cx),
             View::History => self.render_history(cx),
             View::Stash => self.render_stash(cx),
+            View::Activity => self.render_activity(cx),
         };
         div()
             .id("git-panel")
@@ -1604,4 +1893,56 @@ impl Render for GitPanel {
             )
             .into_any_element()
     }
+}
+
+/// "Sent 2 commits to origin/main" and the like.
+fn ref_change_line(verb: &str, r: &RefChange, pulled_from: Option<&str>) -> String {
+    let n = r.commits.len();
+    let commits = if r.more_commits > 0 {
+        format!("{n}+ commits")
+    } else if n == 1 {
+        "1 commit".to_owned()
+    } else {
+        format!("{n} commits")
+    };
+    match (&r.old, &r.new, verb) {
+        (_, None, _) => format!("Deleted {}", r.name),
+        (None, Some(_), "Sent") => format!("Sent new branch {} ({commits})", r.name),
+        (None, Some(_), _) => format!("New branch {} ({commits})", r.name),
+        (Some(_), Some(_), "Sent") => format!("Sent {commits} to {}", r.name),
+        (Some(_), Some(_), "Updated") => match pulled_from {
+            Some(from) => format!("Pulled {commits} from {from} into {}", r.name),
+            None => format!("Updated {} with {commits}", r.name),
+        },
+        (Some(_), Some(_), _) => format!("Received {commits} on {}", r.name),
+    }
+}
+
+/// "sent 2 commits to origin/main", for the toast after a push or pull.
+fn activity_summary(e: &Activity) -> String {
+    let count = |r: &RefChange| {
+        let n = r.commits.len();
+        if r.more_commits > 0 {
+            format!("{n}+ commits")
+        } else if n == 1 {
+            "1 commit".to_owned()
+        } else {
+            format!("{n} commits")
+        }
+    };
+    if let Some(r) = e.sent.first() {
+        return format!("sent {} to {}", count(r), r.name);
+    }
+    if let Some(r) = &e.local {
+        return format!("{} updated with {}", r.name, count(r));
+    }
+    if let Some(r) = e.received.first() {
+        let more = e.received.len() - 1;
+        return if more > 0 {
+            format!("received {} on {} (and {more} more branches)", count(r), r.name)
+        } else {
+            format!("received {} on {}", count(r), r.name)
+        };
+    }
+    "nothing new".to_owned()
 }

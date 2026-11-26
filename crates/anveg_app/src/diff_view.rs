@@ -12,7 +12,7 @@ use std::rc::Rc;
 use anveg_core::git::{self, DiffKind, FilePatch};
 use gpui_cn::prelude::*;
 use gpui_kit::component::diff::{
-    Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffSide, DiffState,
+    Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide, DiffState,
 };
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle,
@@ -50,6 +50,13 @@ pub enum DiffSource {
     },
     /// A ready patch (pull requests).
     Text(String),
+    /// Between two commits (the Git activity log).
+    Range {
+        repo: PathBuf,
+        from: String,
+        to: String,
+        title: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +121,7 @@ impl DiffView {
             DiffSource::Commit { sha, .. } => format!("Commit {}", &sha[..sha.len().min(8)]),
             DiffSource::Compare { relative, .. } => format!("{relative} ↔ disk"),
             DiffSource::Text(_) => "Diff".into(),
+            DiffSource::Range { title, .. } => title.clone(),
         }
     }
 
@@ -138,6 +146,9 @@ impl DiffView {
                     Ok(anveg_core::files::unified_diff(&disk, &mine, &relative))
                 }
                 DiffSource::Text(text) => Ok(text),
+                DiffSource::Range { repo, from, to, .. } => {
+                    git.range_diff(&repo, &from, &to).map_err(|e| format!("{e:#}"))
+                }
             }
         });
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -177,7 +188,31 @@ impl DiffView {
         self.paths = files.iter().map(|f| f.path().clone()).collect();
         match &self.state {
             Some(state) => state.update(cx, |s, cx| s.set_files(files, cx)),
-            None => self.state = Some(cx.new(|cx| DiffState::new(files, cx))),
+            None => {
+                let mode = self.mode(cx);
+                self.state = Some(cx.new(|cx| DiffState::new(files, cx).with_mode(mode)))
+            }
+        }
+        cx.notify();
+    }
+
+    /// Side by side when the setting says so. A file's working changes in
+    /// this view are always one column (side by side, they open in the
+    /// editable split view instead).
+    fn mode(&self, cx: &App) -> DiffMode {
+        let split = model(cx).read(cx).settings.diff_split;
+        if split && !matches!(self.source, DiffSource::GitFile { .. }) {
+            DiffMode::Split
+        } else {
+            DiffMode::Unified
+        }
+    }
+
+    /// The layout setting changed (commits, pull requests, compare).
+    pub fn set_split(&mut self, _split: bool, cx: &mut Context<Self>) {
+        let mode = self.mode(cx);
+        if let Some(state) = &self.state {
+            state.update(cx, |s, cx| s.set_mode(mode, cx));
         }
         cx.notify();
     }
@@ -336,7 +371,9 @@ impl DiffView {
 
     fn open_line(&self, position: &DiffLinePosition, cx: &mut Context<Self>) {
         let path = match &self.source {
-            DiffSource::GitFile { repo, .. } | DiffSource::Commit { repo, .. } => {
+            DiffSource::GitFile { repo, .. }
+            | DiffSource::Commit { repo, .. }
+            | DiffSource::Range { repo, .. } => {
                 repo.join(position.path().as_ref())
             }
             DiffSource::Compare { path, .. } => path.clone(),
@@ -471,12 +508,36 @@ impl Render for DiffView {
                 row.into_any_element()
             });
         }
+        let split = model(cx).read(cx).settings.diff_split;
+        let layout_bar = div()
+            .flex()
+            .flex_shrink_0()
+            .justify_end()
+            .px_2()
+            .py_0p5()
+            .border_b_1()
+            .border_color(c.border)
+            .child(
+                Button::new("diff-layout")
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .label(if split { "Unified" } else { "Split" })
+                    .tooltip(if split {
+                        "Show diffs as one column"
+                    } else {
+                        "Show diffs side by side: before | after"
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(WorkspaceEvent::SetDiffLayout { split: !split })
+                    })),
+            );
         div()
             .id("diff-view")
             .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
+            .child(layout_bar)
             .child(div().flex_1().min_h_0().child(diff))
             .when(busy, |el| {
                 el.child(

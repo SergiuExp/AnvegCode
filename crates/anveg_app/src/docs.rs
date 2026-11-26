@@ -15,6 +15,7 @@ use gpui_kit::{
 use crate::commands_view::CommandsView;
 use crate::session_buttons_view::SessionButtonsView;
 use crate::diff_view::{DiffSource, DiffView};
+use crate::split_diff_view::SplitDiffView;
 use crate::editor_view::EditorView;
 use crate::github::{CreatePrView, LogView, PrView, RunView};
 use crate::project_window::{ProjectWindow, Tab};
@@ -25,6 +26,7 @@ use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
 pub enum DocView {
     Editor(Entity<EditorView>),
     Diff(Entity<DiffView>),
+    SplitDiff(Entity<SplitDiffView>),
     Pr(Entity<PrView>),
     Run(Entity<RunView>),
     Log(Entity<LogView>),
@@ -38,6 +40,7 @@ impl DocView {
         match self {
             Self::Editor(v) => v.read(cx).focus_handle(cx),
             Self::Diff(v) => v.read(cx).focus_handle(cx),
+            Self::SplitDiff(v) => v.read(cx).focus_handle(cx),
             Self::Pr(v) => v.read(cx).focus_handle(cx),
             Self::Run(v) => v.read(cx).focus_handle(cx),
             Self::Log(v) => v.read(cx).focus_handle(cx),
@@ -51,6 +54,7 @@ impl DocView {
         match self {
             Self::Editor(v) => v.clone().into_any_element(),
             Self::Diff(v) => v.clone().into_any_element(),
+            Self::SplitDiff(v) => v.clone().into_any_element(),
             Self::Pr(v) => v.clone().into_any_element(),
             Self::Run(v) => v.clone().into_any_element(),
             Self::Log(v) => v.clone().into_any_element(),
@@ -87,6 +91,7 @@ impl DocTab {
             (Some(DocView::Diff(d)), DocKey::GitDiff { .. } | DocKey::Compare { .. }) => {
                 d.read(cx).title()
             }
+            (Some(DocView::SplitDiff(d)), _) => d.read(cx).title(),
             (_, key) => key_title(key),
         }
     }
@@ -116,6 +121,7 @@ pub fn key_title(key: &DocKey) -> String {
         DocKey::RunLog { title, .. } => format!("Log: {title}"),
         DocKey::CreatePullRequest { .. } => "New Pull Request".into(),
         DocKey::Commands => "Toolbar Commands".into(),
+        DocKey::RangeDiff { title, .. } => title.clone(),
         DocKey::SessionButtons => "Session Buttons".into(),
         DocKey::Compare { path } => format!("{} ↔ disk", file_name(path)),
     }
@@ -189,12 +195,19 @@ impl ProjectWindow {
                 DocView::Editor(cx.new(|cx| EditorView::new(path, project, roots, window, cx)))
             }
             DocKey::GitDiff { repo, path, diff } => {
-                let source = DiffSource::GitFile {
-                    repo: repo.clone(),
-                    path: path.clone(),
-                    kind: *diff,
-                };
-                DocView::Diff(cx.new(|cx| DiffView::new(source, window, cx)))
+                if self.model.read(cx).settings.diff_split {
+                    let (repo, path, kind) = (repo.clone(), path.clone(), *diff);
+                    DocView::SplitDiff(
+                        cx.new(|cx| SplitDiffView::new(repo, path, kind, window, cx)),
+                    )
+                } else {
+                    let source = DiffSource::GitFile {
+                        repo: repo.clone(),
+                        path: path.clone(),
+                        kind: *diff,
+                    };
+                    DocView::Diff(cx.new(|cx| DiffView::new(source, window, cx)))
+                }
             }
             DocKey::Commit { repo, sha, .. } => {
                 let source = DiffSource::Commit {
@@ -237,6 +250,20 @@ impl ProjectWindow {
                 let (repo, id, title) = (repo.clone(), *id, title.clone());
                 DocView::Log(cx.new(|cx| LogView::new(repo, id, title, window, cx)))
             }
+            DocKey::RangeDiff {
+                repo,
+                from,
+                to,
+                title,
+            } => {
+                let source = DiffSource::Range {
+                    repo: repo.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    title: title.clone(),
+                };
+                DocView::Diff(cx.new(|cx| DiffView::new(source, window, cx)))
+            }
             DocKey::Commands => {
                 DocView::Commands(cx.new(|cx| CommandsView::new(project, window, cx)))
             }
@@ -251,6 +278,7 @@ impl ProjectWindow {
         let sub = match &view {
             DocView::Editor(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Diff(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
+            DocView::SplitDiff(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Pr(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Run(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Log(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
@@ -353,12 +381,40 @@ impl ProjectWindow {
     }
 
     /// Refresh git-based documents after a git operation.
+    /// Split or unified diffs: save the choice and rebuild open diff tabs.
+    pub fn set_diff_layout(&mut self, split: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.model
+            .update(cx, |m, cx| m.update_settings(cx, |s| s.diff_split = split));
+        for i in 0..self.docs.len() {
+            let rebuild = matches!(self.docs[i].key, DocKey::GitDiff { .. })
+                || matches!(&self.docs[i].view, Some(DocView::Diff(_)));
+            if !rebuild || self.docs[i].view.is_none() {
+                continue;
+            }
+            match &self.docs[i].view {
+                // Commits, pull requests: the same view switches its mode.
+                Some(DocView::Diff(d)) if !matches!(self.docs[i].key, DocKey::GitDiff { .. }) => {
+                    d.update(cx, |d, cx| d.set_split(split, cx));
+                }
+                _ => {
+                    self.docs[i].view = None;
+                    self.docs[i]._sub = None;
+                    self.ensure_doc_view(i, window, cx);
+                }
+            }
+        }
+        self.show_current(window, cx);
+        cx.notify();
+    }
+
     pub fn reload_git_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for doc in &self.docs {
-            if let Some(DocView::Diff(d)) = &doc.view
-                && matches!(d.read(cx).source, DiffSource::GitFile { .. })
-            {
-                d.update(cx, |d, cx| d.reload(window, cx));
+            match &doc.view {
+                Some(DocView::Diff(d)) if matches!(d.read(cx).source, DiffSource::GitFile { .. }) => {
+                    d.update(cx, |d, cx| d.reload(window, cx))
+                }
+                Some(DocView::SplitDiff(d)) => d.update(cx, |d, cx| d.load(window, cx)),
+                _ => {}
             }
         }
     }
@@ -400,6 +456,10 @@ impl ProjectWindow {
             // The store refreshes, and then the git diff tabs reload.
             WorkspaceEvent::GitChanged => self.git_changed(cx),
             WorkspaceEvent::RunCommand(id) => self.run_project_command(&id, window, cx),
+            WorkspaceEvent::SetDiffLayout { split } => self.set_diff_layout(split, window, cx),
+            WorkspaceEvent::GitActivity(entry) => {
+                self.git_store.update(cx, |s, cx| s.add_activity(*entry, cx))
+            }
         }
     }
 

@@ -30,6 +30,7 @@ mod session_buttons_view;
 mod session_toolbar;
 mod sidebar;
 mod sound;
+mod split_diff_view;
 mod ui;
 mod welcome;
 mod window_tabs;

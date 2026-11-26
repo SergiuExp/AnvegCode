@@ -36,6 +36,11 @@ pub enum WorkspaceEvent {
     GitChanged,
     /// Run the project's toolbar command with this id.
     RunCommand(String),
+    /// Show file diffs side by side (`split`) or in one column, for every
+    /// diff tab (saved in Settings).
+    SetDiffLayout { split: bool },
+    /// A push, pull or fetch happened: add it to the Git activity log.
+    GitActivity(Box<anveg_core::git_activity::Entry>),
 }
 
 /// What a prompt's button does. Gets the text field's value, if the prompt

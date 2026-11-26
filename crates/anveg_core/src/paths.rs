@@ -106,6 +106,12 @@ impl AppPaths {
         self.support_dir.join("notes").join(format!("{project_id}.json"))
     }
 
+    /// `activity/<project-id>.json`: the Git activity log (pushes, pulls,
+    /// fetches).
+    pub fn activity_file(&self, project_id: &str) -> PathBuf {
+        self.support_dir.join("activity").join(format!("{project_id}.json"))
+    }
+
     /// Create the directories if they do not exist.
     pub fn ensure_dirs(&self) -> Result<()> {
         for dir in [&self.support_dir, &self.logs_dir] {

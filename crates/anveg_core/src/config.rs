@@ -75,6 +75,8 @@ pub struct Settings {
     pub session_buttons: Vec<SessionButton>,
     /// A chime when Claude finishes a turn.
     pub finish_sound: FinishSound,
+    /// Diffs side by side (before | after) rather than in one column.
+    pub diff_split: bool,
 }
 
 /// When to play the chime as Claude finishes a turn.
@@ -155,6 +157,7 @@ impl Default for Settings {
             session_status_line: true,
             session_buttons: Vec::new(),
             finish_sound: FinishSound::default(),
+            diff_split: true,
         }
     }
 }
@@ -394,6 +397,13 @@ pub enum DocKey {
     RunLog {
         repo: PathBuf,
         id: u64,
+        title: String,
+    },
+    /// The changes between two commits (from the Git activity log).
+    RangeDiff {
+        repo: PathBuf,
+        from: String,
+        to: String,
         title: String,
     },
     /// The project's toolbar commands editor.

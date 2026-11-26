@@ -238,6 +238,46 @@ impl Git {
             .map(drop)
     }
 
+    /// The content of a blob as stored: `":path"` for the staged version,
+    /// `"HEAD:path"` for the last commit. `None` when it does not exist
+    /// there (a new file, or no commit yet).
+    pub fn blob(&self, repo: &Path, spec: &str) -> Result<Option<Vec<u8>>> {
+        let out = self.read(repo, &["cat-file", "-p", spec])?;
+        Ok(out.success().then_some(out.stdout))
+    }
+
+    /// Put `content` in the index as the staged version of `path` (stage or
+    /// unstage part of a file). Keeps the file's mode; a file not in the
+    /// index yet gets 100755 when executable on disk, else 100644.
+    pub fn set_index_content(&self, repo: &Path, path: &str, content: &[u8]) -> Result<()> {
+        let listed = self.read_ok(repo, &["ls-files", "-s", "--", path])?;
+        let mode = match listed.split_whitespace().next() {
+            Some(mode) => mode.to_owned(),
+            None => {
+                if is_executable(&repo.join(path)) {
+                    "100755".to_owned()
+                } else {
+                    "100644".to_owned()
+                }
+            }
+        };
+        let hashed = process::run(
+            &self
+                .cmd(repo)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(content.to_vec()),
+        )?
+        .check()?
+        .stdout_str();
+        let sha = hashed.trim();
+        if sha.is_empty() {
+            anyhow::bail!("git hash-object printed no hash");
+        }
+        let info = format!("{mode},{sha},{path}");
+        self.write(repo, &["update-index", "--add", "--cacheinfo", &info])
+            .map(drop)
+    }
+
     /// Throw away unstaged changes to tracked files.
     pub fn restore_worktree(&self, repo: &Path, paths: &[&str]) -> Result<()> {
         let mut args = vec!["restore", "--"];
@@ -331,6 +371,25 @@ impl Git {
     pub fn check_branch_name(&self, repo: &Path, name: &str) -> bool {
         self.read(repo, &["check-ref-format", "--branch", name])
             .is_ok_and(|o| o.success())
+    }
+
+    /// A read-only command's non-empty output lines (fails on a non-zero
+    /// exit).
+    pub fn read_lines(&self, repo: &Path, args: &[&str]) -> Result<Vec<String>> {
+        Ok(self
+            .read_ok(repo, args)?
+            .lines()
+            .map(str::to_owned)
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
+
+    /// The patch between two commits (`from` → `to`).
+    pub fn range_diff(&self, repo: &Path, from: &str, to: &str) -> Result<String> {
+        self.read_ok(
+            repo,
+            &["diff", "--no-ext-diff", "--no-color", "-M", from, to],
+        )
     }
 
     pub fn remotes(&self, repo: &Path) -> Result<Vec<String>> {
@@ -1038,6 +1097,17 @@ pub fn copy_to_trash(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &Path) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,6 +1134,34 @@ mod tests {
              && git config commit.gpgsign false",
         )?;
         Ok((tmp, dir))
+    }
+
+    #[test]
+    fn blobs_and_partial_staging() -> Result<()> {
+        let (_t, dir) = repo()?;
+        let git = Git::default();
+        sh(
+            &dir,
+            "printf 'a\\nb\\nc\\n' > f.txt && git add f.txt && git commit -qm init \
+             && printf 'A\\nb\\nC\\n' > f.txt",
+        )?;
+        assert_eq!(git.blob(&dir, "HEAD:f.txt")?.as_deref(), Some(&b"a\nb\nc\n"[..]));
+        assert_eq!(git.blob(&dir, ":nope.txt")?, None);
+        // Stage only the first change.
+        git.set_index_content(&dir, "f.txt", b"A\nb\nc\n")?;
+        assert_eq!(git.blob(&dir, ":f.txt")?.as_deref(), Some(&b"A\nb\nc\n"[..]));
+        let staged = git.file_diff(&dir, "f.txt", DiffKind::Staged)?;
+        assert!(staged.contains("-a\n+A\n") && !staged.contains("+C"));
+        let unstaged = git.file_diff(&dir, "f.txt", DiffKind::Unstaged)?;
+        assert!(unstaged.contains("-c\n+C\n") && !unstaged.contains("+A"));
+        // The working file is untouched.
+        assert_eq!(std::fs::read(dir.join("f.txt"))?, b"A\nb\nC\n");
+        // A new file staged in part keeps a regular mode.
+        std::fs::write(dir.join("n.txt"), "x\ny\n")?;
+        git.set_index_content(&dir, "n.txt", b"x\n")?;
+        let listed = git.read_ok(&dir, &["ls-files", "-s", "--", "n.txt"])?;
+        assert!(listed.starts_with("100644 "), "{listed}");
+        Ok(())
     }
 
     #[test]

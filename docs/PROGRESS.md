@@ -840,3 +840,43 @@ The owner reported that the welcome window's red button only seemed to minimize 
 - [ ] Off: silent.
 
 **Follow-up (2026-11-26): a new chime, chosen by the owner.** Candidates were rendered with a small Python synthesiser and listened to first (melodic, then lower, then shorter, then L5 "deep bowls" with hip-hop/rock touches). The owner picked **"bass riff"**: a funky plucked bass climbing C2, E♭2, F2, G2 and landing on a deep bowl at C2 with an 808-style sub underneath (a sine gliding down to its pitch, gently saturated so laptop speakers hear it), in a small Schroeder room reverb; 2.8 s, peak about -7 dBFS. `anveg_core::chime` was ported from the Python sample for sample: its output is bit-identical to the file the owner approved (all 123,479 samples). The cached file is now `sounds/finished-v2.wav`, so the old chime is not reused. To hear it without the app: `cargo run -p anveg_core --example chime -- chime.wav`.
+
+---
+
+## Split diffs and the Git activity log (owner's request, 2026-11-26)
+
+The owner asked for a split view of each changed file when committing (before on the left, read-only; after on the right, editable; changed rows and the changes inside them highlighted; changes revertable one by one) and a log of what was sent and received. Answers to the questions asked first: the log is about **git push / pull / fetch**; the sides **follow staging**; edits are **saved automatically**; split is the **default with a toggle**, commits and pull requests included.
+
+**Done — split view (`split_diff_view.rs`, `anveg_core::side_diff`)**
+- A changed file from the Git panel opens side by side, in two code editors (syntax colouring, line numbers, search):
+  - **Changes:** staged version (read-only) | working file, **editable and saved automatically** half a second after typing stops (⌘Z undoes, including a Revert).
+  - **Staged:** last commit | staged version, both read-only.
+  - **New:** empty | working file.
+- Changed lines are tinted (green added, red removed, blue changed); **what changed inside a line** is tinted more strongly (word-level diff of paired lines; skipped on very long or almost wholly changed lines). A pure insertion or deletion leaves a line marking the gap on the other side.
+- A **middle strip** joins each change across the two sides with a band and holds its buttons: **Revert** (puts the left side back on the right; undoable) and **Stage** for working changes, **Unstage** for staged ones. Stage/Unstage write just that change into the index (`git hash-object` + `git update-index --cacheinfo`, keeping the file mode), so the working file is never touched.
+- **Scrolling one side scrolls the other** to the matching line (equal stretches one to one, changed blocks in proportion). ↑/↓ jump to the previous/next change; the header shows the count.
+- The tints are painted over the editors after they lay out each frame (the editor records its layout while painting), so they never lag behind scrolling.
+- **Outside changes:** if the file changes on disk (Claude, a formatter) and there are no unsaved edits here, the right side reloads; with unsaved edits nothing is overwritten and a bar offers *Reload (drop my edits)* / *Keep mine (overwrite)*. A save also checks the disk first. CRLF files are shown and diffed as LF and written back as CRLF. Binary, non-UTF-8 and files over 4 MB show a message (the unified view still works).
+- **Split / Unified** toggle on every diff (saved in `settings.json` as `diff_split`, default split). Commits, pull requests, "compare" and the activity log's diffs use gpui-component's read-only side-by-side mode, which also highlights changes inside lines.
+
+**Done — Git activity log (`anveg_core::git_activity`, Git ▸ Activity)**
+- Around every push, pull and fetch (Git panel, and the push made when creating a pull request) the app snapshots the branch refs before and after. The log shows, newest first:
+  - **Push:** "Sent N commits to origin/x" (or "Sent new branch …"), the commits and the changed files.
+  - **Fetch:** "Received N commits on origin/x" for each remote branch that moved.
+  - **Pull:** "Pulled N commits from origin/x into x" (or the remote and local moves separately when they differ).
+  - Failures, with git's message (e.g. a rejected push).
+- **Changes** opens that range's diff (before → after, side by side); a commit opens its own diff; a file opens the range's diff.
+- The toast after a push/pull now says what happened ("Push finished: sent 1 commit to origin/feature-x").
+- Stored per project in `activity/<project-id>.json` in the app's data folder (the newest 100), never in the repository.
+
+**Fixed on the way:** reloading the left side after a save reset its scroll position (it is now only replaced when it changed). The Git panel's view row wraps, so "Stash" and "Activity" fit a narrow sidebar.
+
+**Verified under Xvfb** (with a local bare "remote" and a second clone as a teammate): the split view of a file with a changed line, inserted lines, a renamed function and a deleted line; synchronised scrolling; Revert (written to disk); Stage of one change (only that change staged, checked with `git diff --cached`); typing on the right (saved ~0.5 s later; ⌘Z); the staged view and Unstage; a change made outside the app reloading the right side; Split ↔ Unified; a commit side by side; dark theme; push (new branch), push, a rejected push, a teammate's commit pulled, the log after a restart, and the pull's Changes side by side. Unit tests: hunks, inline ranges, revert/accept, line mapping, partial staging in a real repository, and push/fetch/pull/failed push against a bare remote.
+
+**Manual checks**
+- [ ] Open a file Claude changed from Git ▸ Changes: the split view; scroll one side, the other follows.
+- [ ] Revert one change; ⌘Z brings it back; the file on disk follows within a second.
+- [ ] Stage one change: only it appears under Staged; the file on disk is unchanged.
+- [ ] Edit on the right while Claude edits the same file: the bar appears instead of losing either change.
+- [ ] Push, then Git ▸ Activity: what was sent; Changes shows it side by side.
+- [ ] Pull a teammate's work: "Pulled N commits…", with the files.
