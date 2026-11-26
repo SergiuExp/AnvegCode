@@ -827,7 +827,7 @@ The owner reported that the welcome window's red button only seemed to minimize 
 ## Chime when Claude finishes (owner's request, 2026-11-26)
 
 **Done**
-- When a session goes from working to idle (Claude finished its turn, the same moment as the "Finished" notification), the app plays a **soft, low two-note chime**: G3 then C3 a fifth below, each a struck-bowl tone (fundamental with a slowly beating twin, three fading overtones, 6 ms attack, exponential decay), 2.4 s, peak about -7 dBFS.
+- When a session goes from working to idle (Claude finished its turn, the same moment as the "Finished" notification), the app plays a **chime** (first a soft two-note bowl tone; replaced by the "bass riff", see the follow-up below).
 - It is synthesised in code (`anveg_core::chime`, a 16-bit mono WAV), written once to `<app data>/sounds/finished-v1.wav`, and played with macOS's `/usr/bin/afplay` on a background thread (Linux, for development: `paplay`, else `aplay`). No audio library and no new dependency. Several sessions finishing within 1.5 s give one chime.
 - **Settings ▸ Status and resources ▸ Sound when Claude finishes:** Off / When away (only when that session is not in front of you: its window is not active or it is not shown in a pane) / **Always** (default), with ▷ to hear it.
 
@@ -838,3 +838,5 @@ The owner reported that the welcome window's red button only seemed to minimize 
 - [ ] A session finishing a turn plays it once (Always).
 - [ ] When away: no chime while you watch the session; a chime when it is hidden or the app is in the background.
 - [ ] Off: silent.
+
+**Follow-up (2026-11-26): a new chime, chosen by the owner.** Candidates were rendered with a small Python synthesiser and listened to first (melodic, then lower, then shorter, then L5 "deep bowls" with hip-hop/rock touches). The owner picked **"bass riff"**: a funky plucked bass climbing C2, E♭2, F2, G2 and landing on a deep bowl at C2 with an 808-style sub underneath (a sine gliding down to its pitch, gently saturated so laptop speakers hear it), in a small Schroeder room reverb; 2.8 s, peak about -7 dBFS. `anveg_core::chime` was ported from the Python sample for sample: its output is bit-identical to the file the owner approved (all 123,479 samples). The cached file is now `sounds/finished-v2.wav`, so the old chime is not reused. To hear it without the app: `cargo run -p anveg_core --example chime -- chime.wav`.

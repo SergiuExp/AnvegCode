@@ -1,93 +1,181 @@
-//! The sound played when Claude finishes a turn: a soft, low two-note
-//! chime (G3, then C3 a fifth below, which sounds "done"), synthesised
-//! here as a mono 16-bit WAV so no audio file or audio library is needed.
+//! The sound played when Claude finishes a turn, synthesised here as a mono
+//! 16-bit WAV so no audio file or audio library is needed.
 //!
-//! Each note is a struck-bowl tone: a fundamental with a slightly detuned
-//! twin (a slow shimmer), plus a few quieter overtones that fade faster than
-//! the fundamental, a 6 ms attack (no click) and an exponential decay.
+//! "Bass riff" (chosen by the owner from several candidates): a funky
+//! plucked bass climbing C2, E♭2, F2, G2, landing on a deep bowl at C2 with
+//! an 808-style sub underneath, in a small room reverb. 2.8 s, peak about
+//! -7 dBFS.
+//!
+//! The instruments are additive: a plucked bass (six harmonics, the higher
+//! ones fading faster), a bowl (a fundamental with inharmonic overtones),
+//! and an 808 (a sine gliding down to its pitch, gently saturated so
+//! laptop speakers still hear it). The reverb is a classic Schroeder room:
+//! four feedback combs in parallel, then two allpasses.
 
 use std::f64::consts::TAU;
 
 pub const SAMPLE_RATE: u32 = 44_100;
+const RATE: f64 = SAMPLE_RATE as f64;
 /// Length of the chime, in seconds.
-pub const DURATION: f64 = 2.4;
+pub const DURATION: f64 = 2.8;
 /// The loudest sample, as a fraction of full scale (about -7 dBFS).
 const PEAK: f64 = 0.45;
+/// How much reverb is mixed in.
+const WET: f64 = 0.22;
+/// The final fade, in seconds.
+const FADE: f64 = 0.15;
 
-struct Note {
-    freq: f64,
-    start: f64,
-    amp: f64,
-    /// Time constant of the fundamental's decay, in seconds.
-    decay: f64,
+#[derive(Clone, Copy)]
+enum Instrument {
+    PluckBass,
+    LowBowl,
+    Kick808,
 }
 
-/// (frequency ratio, relative amplitude, relative decay).
-const PARTIALS: &[(f64, f64, f64)] = &[
-    (1.0, 1.0, 1.0),
-    (2.0, 0.30, 0.55),
-    (3.01, 0.11, 0.35),
-    (4.2, 0.04, 0.22),
-];
+struct Note {
+    /// Semitones from A4 (440 Hz).
+    semitones: i32,
+    start: f64,
+    amp: f64,
+    instrument: Instrument,
+}
+
+const C2: i32 = -33;
+const E_FLAT2: i32 = -30;
+const F2: i32 = -28;
+const G2: i32 = -26;
 
 const NOTES: &[Note] = &[
-    // G3
-    Note {
-        freq: 196.0,
-        start: 0.0,
-        amp: 0.55,
-        decay: 0.55,
-    },
-    // C3
-    Note {
-        freq: 130.81,
-        start: 0.17,
-        amp: 1.0,
-        decay: 0.85,
-    },
+    Note { semitones: C2, start: 0.0, amp: 0.8, instrument: Instrument::PluckBass },
+    Note { semitones: E_FLAT2, start: 0.14, amp: 0.75, instrument: Instrument::PluckBass },
+    Note { semitones: F2, start: 0.28, amp: 0.75, instrument: Instrument::PluckBass },
+    Note { semitones: G2, start: 0.42, amp: 0.8, instrument: Instrument::PluckBass },
+    Note { semitones: C2, start: 0.6, amp: 0.9, instrument: Instrument::LowBowl },
+    Note { semitones: C2, start: 0.6, amp: 0.7, instrument: Instrument::Kick808 },
 ];
 
-fn note_sample(note: &Note, t: f64) -> f64 {
-    let t = t - note.start;
-    if t < 0.0 {
-        return 0.0;
+fn freq(semitones: i32) -> f64 {
+    440.0 * 2f64.powf(f64::from(semitones) / 12.0)
+}
+
+/// A smooth attack and an exponential decay.
+fn env(t: f64, attack: f64, decay: f64) -> f64 {
+    (1.0 - (-t / attack).exp()) * (-t / decay).exp()
+}
+
+/// The bowl's partials: (frequency ratio, amplitude, relative decay).
+const BOWL: &[(f64, f64, f64)] = &[
+    (1.0, 1.0, 1.0),
+    (2.0, 0.55, 0.7),
+    (3.01, 0.30, 0.45),
+    (4.2, 0.12, 0.3),
+    (5.4, 0.05, 0.2),
+];
+
+fn low_bowl(f: f64, t: f64) -> f64 {
+    BOWL.iter()
+        .map(|&(ratio, amp, rel)| amp * env(t, 0.008, 1.2 * rel) * (TAU * f * ratio * t).sin())
+        .sum()
+}
+
+fn pluck_bass(f: f64, t: f64) -> f64 {
+    (1..=6)
+        .map(|n| {
+            let n = f64::from(n);
+            (1.0 / n.powf(1.3)) * (TAU * f * n * t).sin() * env(t, 0.003, 0.5 / n.powf(0.6))
+        })
+        .sum()
+}
+
+/// The 808 needs its phase accumulated sample by sample (its pitch glides).
+struct Kick808 {
+    f: f64,
+    phase_sum: f64,
+}
+
+impl Kick808 {
+    fn next(&mut self, t: f64) -> f64 {
+        let freq = self.f * (1.0 + 1.5 * (-t / 0.03).exp());
+        self.phase_sum += freq;
+        let tone = (TAU * self.phase_sum / RATE).sin() * env(t, 0.001, 0.7);
+        (1.8 * tone).tanh() / 1.8f64.tanh()
     }
-    let attack = 1.0 - (-t / 0.006).exp();
-    let mut sum = 0.0;
-    for &(ratio, amp, decay) in PARTIALS {
-        let f = note.freq * ratio;
-        let env = (-t / (note.decay * decay)).exp();
-        let mut tone = (TAU * f * t).sin();
-        if ratio == 1.0 {
-            // A twin 0.7 Hz higher: a slow, warm beating.
-            tone = 0.7 * tone + 0.3 * (TAU * (f + 0.7) * t).sin();
+}
+
+fn dry() -> Vec<f64> {
+    let n = (DURATION * RATE) as usize;
+    let mut out = vec![0.0; n];
+    for note in NOTES {
+        let f = freq(note.semitones);
+        let mut kick = Kick808 { f, phase_sum: 0.0 };
+        for (i, sample) in out.iter_mut().enumerate() {
+            let t = i as f64 / RATE - note.start;
+            if t < 0.0 {
+                continue;
+            }
+            let value = match note.instrument {
+                Instrument::PluckBass => pluck_bass(f, t),
+                Instrument::LowBowl => low_bowl(f, t),
+                Instrument::Kick808 => kick.next(t),
+            };
+            *sample += note.amp * value;
         }
-        sum += amp * env * tone;
     }
-    note.amp * attack * sum
+    out
+}
+
+/// A small room: four feedback combs in parallel, then two allpasses.
+fn reverb(x: &[f64]) -> Vec<f64> {
+    let delay = |ms: f64| (RATE * ms / 1000.0) as usize;
+    let mut out = vec![0.0; x.len()];
+    for (ms, feedback) in [(29.7, 0.77), (37.1, 0.75), (41.1, 0.73), (43.7, 0.71)] {
+        let d = delay(ms);
+        let mut y = vec![0.0; x.len()];
+        for i in 0..x.len() {
+            y[i] = x[i] + if i >= d { feedback * y[i - d] } else { 0.0 };
+        }
+        for (o, v) in out.iter_mut().zip(&y) {
+            *o += v;
+        }
+    }
+    for o in &mut out {
+        *o /= 4.0;
+    }
+    for (ms, g) in [(5.0, 0.7), (1.7, 0.7)] {
+        let d = delay(ms);
+        let mut y = vec![0.0; out.len()];
+        for i in 0..out.len() {
+            let (dx, dy) = if i >= d { (out[i - d], y[i - d]) } else { (0.0, 0.0) };
+            y[i] = -g * out[i] + dx + g * dy;
+        }
+        out = y;
+    }
+    out
 }
 
 /// The chime's samples, from -1.0 to 1.0.
 pub fn samples() -> Vec<f64> {
-    let n = (DURATION * f64::from(SAMPLE_RATE)) as usize;
-    let fade = (0.15 * f64::from(SAMPLE_RATE)) as usize;
-    let mut out: Vec<f64> = (0..n)
-        .map(|i| {
-            let t = i as f64 / f64::from(SAMPLE_RATE);
-            NOTES.iter().map(|note| note_sample(note, t)).sum()
-        })
-        .collect();
-    // A short fade so the end is silent whatever is left of the decay.
-    for (k, s) in out.iter_mut().rev().take(fade).enumerate() {
-        *s *= k as f64 / fade as f64;
+    let dry = dry();
+    let wet = reverb(&dry);
+    let mut mix: Vec<f64> = dry.iter().zip(&wet).map(|(d, w)| d + WET * w).collect();
+    // A fade from 1 to 0 over the last samples, as numpy's linspace does.
+    let fade = (FADE * RATE) as usize;
+    let len = mix.len();
+    for k in 0..fade.min(len) {
+        let gain = if fade > 1 {
+            1.0 - k as f64 / (fade - 1) as f64
+        } else {
+            0.0
+        };
+        mix[len - fade + k] *= gain;
     }
-    let max = out.iter().fold(0.0_f64, |m, s| m.max(s.abs()));
+    let max = mix.iter().fold(0.0_f64, |m, s| m.max(s.abs()));
     if max > 0.0 {
-        for s in &mut out {
+        for s in &mut mix {
             *s *= PEAK / max;
         }
     }
-    out
+    mix
 }
 
 /// The chime as a WAV file (PCM, mono, 16-bit, 44.1 kHz).
@@ -128,7 +216,7 @@ mod tests {
     #[test]
     fn the_wav_is_well_formed() {
         let wav = finished_wav();
-        let samples = (DURATION * f64::from(SAMPLE_RATE)) as usize;
+        let samples = (DURATION * RATE) as usize;
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(&wav[36..40], b"data");
@@ -142,13 +230,21 @@ mod tests {
         let s = samples();
         let peak = s.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         assert!((peak - PEAK).abs() < 1e-9, "peak {peak}");
-        // The first sample is silent and the attack rises gradually.
         assert!(s[0].abs() < 1e-9);
         assert!(s[..20].iter().all(|x| x.abs() < 0.1));
         assert!(s.last().is_some_and(|x| x.abs() < 1e-9));
-        // Still sounding a second in (the low note rings).
-        let at = SAMPLE_RATE as usize;
+        // No jumps (clicks) anywhere.
+        let jump = s.windows(2).fold(0.0_f64, |m, w| m.max((w[1] - w[0]).abs()));
+        assert!(jump < 0.05, "jump {jump}");
+        // The bowl and the 808 still ring a second after they land.
+        let at = (1.6 * RATE) as usize;
         let ring = s[at..at + 2000].iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-        assert!(ring > 0.05, "ring {ring}");
+        assert!(ring > 0.03, "ring {ring}");
+    }
+
+    #[test]
+    fn the_notes_are_the_riff() {
+        assert!((freq(C2) - 65.406_391_325).abs() < 1e-6);
+        assert!((freq(G2) - 97.998_858_995).abs() < 1e-6);
     }
 }

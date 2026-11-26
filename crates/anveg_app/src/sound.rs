@@ -16,7 +16,7 @@ use gpui_kit::App;
 use crate::model::model;
 
 /// The file name carries a version: change it when the chime changes.
-const FILE_NAME: &str = "finished-v1.wav";
+const FILE_NAME: &str = "finished-v2.wav";
 /// At most one chime this often.
 const MIN_GAP: Duration = Duration::from_millis(1500);
 
