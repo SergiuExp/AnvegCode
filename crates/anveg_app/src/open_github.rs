@@ -35,6 +35,7 @@ pub struct OpenFromGitHub {
     selected: Option<String>,
     error: Option<String>,
     job: Option<CloneJob>,
+    log_view: Entity<crate::github_log_view::GitHubLogView>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<gpui_kit::Subscription>,
 }
@@ -97,6 +98,7 @@ impl OpenFromGitHub {
             selected: None,
             error: None,
             job: None,
+            log_view: cx.new(|cx| crate::github_log_view::GitHubLogView::new("open-github-log", false, 160., window, cx)),
             _tasks: Vec::new(),
             _subs: subs,
         };
@@ -184,7 +186,10 @@ impl OpenFromGitHub {
     }
 
     fn clone_into(&mut self, url: String, dest: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let git = model(cx).read(cx).git();
+        let (git, log) = {
+            let m = model(cx).read(cx);
+            (m.git(), m.github_log.clone())
+        };
         let cancel = CancelToken::new();
         self.job = Some(CloneJob {
             progress: format!("Cloning into {}…", dest.display()),
@@ -196,7 +201,10 @@ impl OpenFromGitHub {
             let _ = tx.unbounded_send(line.to_owned());
         });
         let d = dest.clone();
-        let task = cx.background_spawn(async move { git.clone_repo(&url, &d, &cancel, Some(progress)) });
+        let task = cx.background_spawn(async move {
+            let label = format!("Cloning {url} into {}", d.display());
+            log.op(&label, || git.clone_repo(&url, &d, &cancel, Some(progress)))
+        });
         self._tasks.push(cx.spawn(async move |this, cx| {
             while let Some(line) = rx.next().await {
                 let _ = this.update(cx, |this, cx| {
@@ -370,5 +378,6 @@ impl Render for OpenFromGitHub {
                             }),
                     ),
             )
+            .child(self.log_view.clone())
     }
 }

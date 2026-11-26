@@ -15,6 +15,7 @@ mod editor_view;
 mod files_panel;
 mod git_panel;
 mod github;
+mod github_log_view;
 mod languages;
 mod lsp_manager;
 mod logging;

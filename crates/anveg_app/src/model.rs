@@ -11,6 +11,7 @@ use anveg_core::config::{AppState, ProjectStore, Settings, WindowState};
 use anveg_core::fswatch::FsWatchService;
 use anveg_core::github_api::{self, GitHub, Secret, Transport, UreqTransport};
 use anveg_core::github_auth::{self, KeychainStore, Poll, TokenStore};
+use anveg_core::github_log::{GitHubLog, Level};
 use anveg_core::git::Git;
 use anveg_core::paths::AppPaths;
 use anveg_core::status::{HookMessage, HookServer, hooks_settings};
@@ -79,9 +80,9 @@ enum VerifyError {
 }
 
 /// Who a token belongs to (`GET /user`).
-fn verify(transport: &Arc<dyn Transport>, token: Secret) -> Result<String, VerifyError> {
-    let api = github_api::Api::new(transport.clone(), Some(token));
-    match api.get::<github_api::User>("/user") {
+fn verify(transport: &Arc<dyn Transport>, token: Secret, log: &GitHubLog) -> Result<String, VerifyError> {
+    let api = github_api::Api::new(transport.clone(), Some(token)).with_log(log.clone());
+    match log.op("Checking the token with GitHub", || api.get::<github_api::User>("/user")) {
         Ok(u) => Ok(u.login),
         Err(e) if github_api::is_signed_out(&e) => Err(VerifyError::Rejected(
             "GitHub did not accept that token (wrong, expired or revoked).".into(),
@@ -147,6 +148,9 @@ pub struct AppModel {
     pub device_sign_in: Option<DeviceSignIn>,
     /// The last sign-in problem, to show next to the sign-in buttons.
     pub github_note: Option<String>,
+    /// What the app did with GitHub this run (the log under the GitHub
+    /// panel). Memory only.
+    pub github_log: GitHubLog,
     transport: Arc<dyn Transport>,
     token_store: Arc<dyn TokenStore>,
     /// The `GIT_ASKPASS` script that hands git the token.
@@ -189,6 +193,7 @@ impl AppModel {
             github_token: None,
             device_sign_in: None,
             github_note: None,
+            github_log: GitHubLog::new(),
             transport: Arc::new(UreqTransport::new()),
             token_store: Arc::new(KeychainStore::new(keychain_service())),
             askpass_script: None,
@@ -257,7 +262,7 @@ impl AppModel {
     pub fn github(&self) -> Option<GitHub> {
         let token = self.github_token.clone()?;
         Some(GitHub::new(
-            github_api::Api::new(self.transport.clone(), Some(token)),
+            github_api::Api::new(self.transport.clone(), Some(token)).with_log(self.github_log.clone()),
             self.git(),
         ))
     }
@@ -279,6 +284,7 @@ impl AppModel {
         let store = self.token_store.clone();
         let transport = self.transport.clone();
         let askpass_dir = self.paths.support_dir.clone();
+        let log = self.github_log.clone();
         let task = cx.background_spawn(async move {
             let askpass = github_auth::write_askpass(&askpass_dir)
                 .map_err(|error| tracing::warn!(%error, "could not write the git askpass script"))
@@ -287,10 +293,15 @@ impl AppModel {
                 Ok(t) => t,
                 Err(error) => {
                     tracing::warn!(%error, "keychain");
+                    log.push(Level::Failed, format!("Reading the saved sign-in from the keychain: {error:#}"));
                     None
                 }
             };
-            let login = token.clone().map(|t| verify(&transport, t));
+            match &token {
+                Some(_) => log.info("Found a saved sign-in in the keychain"),
+                None => log.info("No saved GitHub sign-in"),
+            }
+            let login = token.clone().map(|t| verify(&transport, t, &log));
             (askpass, token, login)
         });
         cx.spawn(async move |this, cx| {
@@ -314,25 +325,26 @@ impl AppModel {
     ) {
         match (token, login) {
             (Some(token), Some(Ok(login))) => {
-                if save && let Err(e) = self.token_store.set(&token) {
-                    self.github_note = Some(format!("{e:#}"));
-                }
-                self.github_token = Some(token);
                 self.github_note = None;
+                self.save_token(&token, save);
+                self.github_log.info(format!("Signed in to GitHub as {login}"));
+                self.github_token = Some(token);
                 self.set_auth(AuthState::SignedIn { login }, cx);
             }
             (Some(token), Some(Err(VerifyError::Unreachable(message)))) => {
                 tracing::info!(%message, "GitHub unreachable; keeping the saved token");
-                if save && let Err(e) = self.token_store.set(&token) {
-                    self.github_note = Some(format!("{e:#}"));
-                }
+                self.github_log
+                    .info("GitHub could not be reached; keeping the sign-in (it is checked again on the next call)");
+                self.save_token(&token, save);
                 self.github_token = Some(token);
                 self.set_auth(AuthState::SignedIn { login: String::new() }, cx);
             }
             (Some(_), Some(Err(VerifyError::Rejected(message)))) => {
                 if !save {
                     let _ = self.token_store.delete();
+                    self.github_log.info("Removed the saved sign-in from the keychain");
                 }
+                self.github_log.push(Level::Failed, format!("Not signed in: {message}"));
                 self.github_token = None;
                 self.github_note = Some(message);
                 self.set_auth(AuthState::SignedOut, cx);
@@ -344,18 +356,37 @@ impl AppModel {
         }
     }
 
+    /// Keep the token in the keychain (when it is new).
+    fn save_token(&mut self, token: &Secret, save: bool) {
+        if !save {
+            return;
+        }
+        match self.token_store.set(token) {
+            Ok(()) => self.github_log.info("Saved the sign-in in the keychain"),
+            Err(e) => {
+                self.github_log
+                    .push(Level::Failed, format!("Saving the sign-in in the keychain: {e:#}"));
+                self.github_note = Some(format!("{e:#}"));
+            }
+        }
+    }
+
     /// Settings: a pasted personal access token.
     pub fn sign_in_with_token(&mut self, text: &str, cx: &mut Context<Self>) {
         let Some(token) = github_auth::clean_token(text) else {
+            self.github_log
+                .push(Level::Failed, "Sign in with a token: that does not look like a GitHub token");
             self.github_note = Some("That does not look like a GitHub token.".into());
             cx.notify();
             return;
         };
+        self.github_log.info("Signing in with a personal access token");
         self.github_note = None;
         self.set_auth(AuthState::Checking, cx);
         let transport = self.transport.clone();
         let t = token.clone();
-        let task = cx.background_spawn(async move { verify(&transport, t) });
+        let log = self.github_log.clone();
+        let task = cx.background_spawn(async move { verify(&transport, t, &log) });
         cx.spawn(async move |this, cx| {
             let login = task.await;
             let _ = this.update(cx, |this, cx| this.apply_verified(Some(token), Some(login), true, cx));
@@ -379,6 +410,8 @@ impl AppModel {
     /// and wait for the user to approve.
     pub fn start_device_sign_in(&mut self, cx: &mut Context<Self>) {
         let Some(client_id) = self.github_client_id() else {
+            self.github_log
+                .push(Level::Failed, "Sign in with GitHub: no OAuth App client ID is set (Settings ▸ GitHub)");
             self.github_note = Some(
                 "Signing in through the browser needs the OAuth App's client ID (Settings ▸ GitHub). \
                  You can paste a personal access token instead."
@@ -389,6 +422,7 @@ impl AppModel {
         };
         self.github_note = None;
         let transport = self.transport.clone();
+        let log = self.github_log.clone();
         self.device_sign_in = Some(DeviceSignIn {
             user_code: String::new(),
             verification_uri: String::new(),
@@ -397,8 +431,13 @@ impl AppModel {
         self.device_task = Some(cx.spawn(async move |this, cx| {
             let t = transport.clone();
             let id = client_id.clone();
+            let l = log.clone();
             let code = cx
-                .background_spawn(async move { github_auth::request_device_code(t.as_ref(), &id) })
+                .background_spawn(async move {
+                    l.op("Asking GitHub for a sign-in code", || {
+                        github_auth::request_device_code(t.as_ref(), &id)
+                    })
+                })
                 .await;
             let code = match code {
                 Ok(code) => code,
@@ -419,6 +458,10 @@ impl AppModel {
                 cx.open_url(&code.verification_uri);
                 cx.notify();
             });
+            log.info(format!(
+                "Opened {} in the browser; waiting for you to enter the code and approve",
+                code.verification_uri
+            ));
             let mut interval = code.interval.max(1);
             let deadline = Instant::now() + Duration::from_secs(code.expires_in.max(60));
             loop {
@@ -426,6 +469,7 @@ impl AppModel {
                     .timer(Duration::from_secs(interval))
                     .await;
                 if Instant::now() > deadline {
+                    log.push(Level::Failed, "Sign in with GitHub: the code expired before it was approved");
                     let _ = this.update(cx, |this, cx| {
                         this.device_sign_in = None;
                         this.github_note = Some("The sign-in code expired. Try again.".into());
@@ -439,11 +483,16 @@ impl AppModel {
                     .await;
                 match poll {
                     Poll::Pending => {}
-                    Poll::SlowDown => interval += 5,
+                    Poll::SlowDown => {
+                        interval += 5;
+                        log.detail(format!("GitHub asked to poll more slowly (every {interval} s)"));
+                    }
                     Poll::Token(token) => {
+                        log.push(Level::Ok, "GitHub approved the sign-in");
                         let t = transport.clone();
                         let tok = token.clone();
-                        let login = cx.background_spawn(async move { verify(&t, tok) }).await;
+                        let l = log.clone();
+                        let login = cx.background_spawn(async move { verify(&t, tok, &l) }).await;
                         let _ = this.update(cx, |this, cx| {
                             this.device_sign_in = None;
                             this.apply_verified(Some(token), Some(login), true, cx);
@@ -457,6 +506,7 @@ impl AppModel {
                             Poll::Failed(m) => m,
                             _ => String::new(),
                         };
+                        log.push(Level::Failed, format!("Sign in with GitHub: {message}"));
                         let _ = this.update(cx, |this, cx| {
                             this.device_sign_in = None;
                             this.github_note = Some(message);
@@ -470,14 +520,21 @@ impl AppModel {
     }
 
     pub fn cancel_device_sign_in(&mut self, cx: &mut Context<Self>) {
-        self.device_task = None;
+        if self.device_task.take().is_some() {
+            self.github_log.info("Sign in with GitHub cancelled");
+        }
         self.device_sign_in = None;
         cx.notify();
     }
 
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
-        if let Err(e) = self.token_store.delete() {
-            self.github_note = Some(format!("{e:#}"));
+        match self.token_store.delete() {
+            Ok(()) => self.github_log.info("Signed out; removed the sign-in from the keychain"),
+            Err(e) => {
+                self.github_log
+                    .push(Level::Failed, format!("Signing out: removing the sign-in from the keychain: {e:#}"));
+                self.github_note = Some(format!("{e:#}"));
+            }
         }
         self.github_token = None;
         self.device_task = None;
@@ -487,6 +544,10 @@ impl AppModel {
 
     /// A GitHub call answered 401: the token was revoked or expired.
     pub fn github_rejected(&mut self, cx: &mut Context<Self>) {
+        self.github_log.push(
+            Level::Failed,
+            "GitHub answered 401 (bad credentials): the saved sign-in no longer works; signed out",
+        );
         let _ = self.token_store.delete();
         self.github_token = None;
         self.github_note = Some("GitHub no longer accepts the saved sign-in. Sign in again.".into());

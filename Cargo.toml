@@ -71,6 +71,8 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # certificates (rustls-platform-verifier), so no root list ships.
 ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip", "json"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Local time for the GitHub log (already in the tree via other crates).
+jiff = "=1.0.2"
 # The GitHub token lives in the OS keychain, never in a file.
 keyring = { version = "=3.6.3", default-features = false }
 

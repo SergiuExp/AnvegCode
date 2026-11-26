@@ -24,6 +24,7 @@ use crate::gh::{
     PrSummary, RateLimited, RepoInfo, Review, RollupItem, Run, RunDetail,
 };
 use crate::git::Git;
+use crate::github_log::GitHubLog;
 
 pub const API: &str = "https://api.github.com";
 pub const API_VERSION: &str = "2022-11-28";
@@ -297,6 +298,8 @@ pub struct Api {
     transport: Arc<dyn Transport>,
     token: Option<Secret>,
     base: String,
+    /// Every request goes here (method, path, status, time).
+    log: Option<GitHubLog>,
 }
 
 impl Api {
@@ -305,7 +308,25 @@ impl Api {
             transport,
             token,
             base: api_base(),
+            log: None,
         }
+    }
+
+    pub fn with_log(mut self, log: GitHubLog) -> Self {
+        self.log = Some(log);
+        self
+    }
+
+    pub fn log(&self) -> Option<&GitHubLog> {
+        self.log.as_ref()
+    }
+
+    /// The URL without the API host (for the log).
+    fn short(&self, url: &str) -> String {
+        url.strip_prefix(&self.base)
+            .or_else(|| url.strip_prefix(API))
+            .unwrap_or(url)
+            .to_owned()
     }
 
     fn url(&self, path: &str) -> String {
@@ -332,13 +353,23 @@ impl Api {
             }
             None => None,
         };
-        let response = self.transport.send(&Request {
+        let url = self.url(path);
+        let started = std::time::Instant::now();
+        let sent = self.transport.send(&Request {
             method,
-            url: self.url(path),
+            url: url.clone(),
             headers,
             body,
-        })?;
-        check(response)
+        });
+        if let Some(log) = &self.log {
+            let ms = started.elapsed().as_millis();
+            let short = self.short(&url);
+            match &sent {
+                Ok(r) => log.detail(format!("{method} {short} → {} ({ms} ms)", r.status)),
+                Err(e) => log.detail(format!("{method} {short} → no answer: {e:#} ({ms} ms)")),
+            }
+        }
+        check(sent?)
     }
 
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -767,6 +798,14 @@ impl GitHub {
         Self { api, git }
     }
 
+    /// Run `f` as one logged operation (when there is a log).
+    pub fn op<T>(&self, label: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        match self.api.log() {
+            Some(log) => log.op(label, f),
+            None => f(),
+        }
+    }
+
     /// `owner/name` of `dir`'s `origin` (or its first GitHub remote).
     pub fn slug(&self, dir: &Path) -> Result<(String, String)> {
         let remotes = self.git.remotes(dir).unwrap_or_default();
@@ -790,15 +829,21 @@ impl GitHub {
     }
 
     pub fn user(&self) -> Result<User> {
-        self.api.get("/user")
+        self.op("Checking the signed-in account", || self.api.get("/user"))
     }
 
     pub fn orgs(&self) -> Result<Vec<Org>> {
-        self.api.get_paged("/user/orgs?per_page=100", None, 500)
+        self.op("Listing your organizations", || {
+            self.api.get_paged("/user/orgs?per_page=100", None, 500)
+        })
     }
 
     /// The user's repositories, most recently updated first.
     pub fn user_repos(&self, max: usize) -> Result<Vec<RepoItem>> {
+        self.op("Listing your repositories", || self.user_repos_inner(max))
+    }
+
+    fn user_repos_inner(&self, max: usize) -> Result<Vec<RepoItem>> {
         self.api.get_paged(
             "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
             None,
@@ -821,7 +866,13 @@ impl GitHub {
             "private": new.private,
             "auto_init": false,
         });
-        self.api.send_json("POST", &path, &body).map_err(|e| {
+        let label = format!(
+            "Creating repository {}/{} ({})",
+            new.org.as_deref().unwrap_or("your account"),
+            new.name,
+            if new.private { "private" } else { "public" }
+        );
+        self.op(&label, || self.api.send_json("POST", &path, &body)).map_err(|e| {
             if api_status(&e) == Some(422) && e.to_string().to_lowercase().contains("already exists") {
                 anyhow!(
                     "A repository named “{}” already exists in {}. Choose another name.",
@@ -835,7 +886,8 @@ impl GitHub {
     }
 
     pub fn repo(&self, dir: &Path) -> Result<RepoInfo> {
-        let r: RestRepo = self.api.get(&self.repo_path(dir)?)?;
+        let path = self.repo_path(dir)?;
+        let r: RestRepo = self.op(&format!("Reading repository {}", &path[7..]), || self.api.get(&path))?;
         Ok(RepoInfo {
             name_with_owner: r.full_name,
             url: r.html_url,
@@ -849,7 +901,10 @@ impl GitHub {
         let query = format!(
             "query($q: String!) {{ search(query: $q, type: ISSUE, first: 50) {{ nodes {{ ... on PullRequest {{ number title author {{ login }} headRefName isDraft reviewDecision updatedAt {ROLLUP} }} }} }} }}"
         );
-        let found: GqlSearch = self.api.graphql(&query, json!({ "q": q }))?;
+        let found: GqlSearch = self.op(
+            &format!("Listing pull requests ({}) in {o}/{r}", filter.label()),
+            || self.api.graphql(&query, json!({ "q": q })),
+        )?;
         Ok(found
             .search
             .nodes
@@ -864,7 +919,9 @@ impl GitHub {
         let query = format!(
             "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, name: $r) {{ pullRequest(number: $n) {{ number title author {{ login }} body baseRefName headRefName isDraft state reviewDecision url additions deletions changedFiles reviews(last: 50) {{ nodes {{ author {{ login }} state body submittedAt }} }} comments(last: 50) {{ nodes {{ author {{ login }} body createdAt }} }} {ROLLUP} }} }} }}"
         );
-        let found: GqlRepoPr = self.api.graphql(&query, json!({ "o": o, "r": r, "n": number }))?;
+        let found: GqlRepoPr = self.op(&format!("Reading pull request #{number} in {o}/{r}"), || {
+            self.api.graphql(&query, json!({ "o": o, "r": r, "n": number }))
+        })?;
         found
             .repository
             .and_then(|r| r.pull_request)
@@ -879,6 +936,10 @@ impl GitHub {
     /// Check runs and commit statuses of the PR's head commit.
     pub fn pr_checks(&self, dir: &Path, number: u64) -> Result<Vec<Check>> {
         let base = self.repo_path(dir)?;
+        self.op(&format!("Reading the checks of #{number}"), || self.pr_checks_inner(&base, dir, number))
+    }
+
+    fn pr_checks_inner(&self, base: &str, dir: &Path, number: u64) -> Result<Vec<Check>> {
         let sha = self.pull(dir, number)?.head.sha;
         let runs: Vec<RestCheckRun> = self.api.get_paged(
             &format!("{base}/commits/{sha}/check-runs?per_page=100"),
@@ -913,13 +974,37 @@ impl GitHub {
     }
 
     pub fn pr_diff(&self, dir: &Path, number: u64) -> Result<String> {
-        self.api.get_text(
-            &format!("{}/pulls/{number}", self.repo_path(dir)?),
-            "application/vnd.github.diff",
-        )
+        let path = format!("{}/pulls/{number}", self.repo_path(dir)?);
+        self.op(&format!("Reading the diff of #{number}"), || {
+            self.api.get_text(&path, "application/vnd.github.diff")
+        })
     }
 
     pub fn pr_action(&self, dir: &Path, number: u64, action: &PrAction) -> Result<String> {
+        let label = match action {
+            PrAction::Merge(m) => format!("Merging #{number} ({})", m.label().to_lowercase()),
+            PrAction::Close => format!("Closing #{number}"),
+            PrAction::Ready => format!("Marking #{number} ready for review"),
+            PrAction::Checkout => format!("Checking out #{number}"),
+        };
+        self.op(&label, || self.pr_action_inner(dir, number, action))
+    }
+
+    /// A git step inside an operation, as a detail line.
+    pub fn git_step<T>(&self, what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let started = std::time::Instant::now();
+        let r = f();
+        if let Some(log) = self.api.log() {
+            let ms = started.elapsed().as_millis();
+            match &r {
+                Ok(_) => log.detail(format!("{what} → ok ({ms} ms)")),
+                Err(e) => log.detail(format!("{what} → failed: {e:#} ({ms} ms)")),
+            }
+        }
+        r
+    }
+
+    fn pr_action_inner(&self, dir: &Path, number: u64, action: &PrAction) -> Result<String> {
         let base = self.repo_path(dir)?;
         match action {
             PrAction::Merge(method) => {
@@ -953,16 +1038,22 @@ impl GitHub {
                     .is_some_and(|h| h.full_name.eq_ignore_ascii_case(&format!("{o}/{r}")));
                 let remote = self.git.github_remote_name(dir, &o, &r).unwrap_or_else(|| "origin".into());
                 let branch = if same_repo {
-                    self.git.fetch_refspec(dir, &remote, &pr.head.name)?;
+                    self.git_step(&format!("git fetch {remote} {}", pr.head.name), || {
+                        self.git.fetch_refspec(dir, &remote, &pr.head.name)
+                    })?;
                     pr.head.name.clone()
                 } else {
                     // A fork: its head lives at refs/pull/N/head.
                     let local = format!("pr-{}-{}", pr.number, pr.head.name);
-                    self.git
-                        .fetch_refspec(dir, &remote, &format!("+refs/pull/{number}/head:refs/heads/{local}"))?;
+                    let spec = format!("+refs/pull/{number}/head:refs/heads/{local}");
+                    self.git_step(&format!("git fetch {remote} {spec}"), || {
+                        self.git.fetch_refspec(dir, &remote, &spec)
+                    })?;
                     local
                 };
-                self.git.switch_branch(dir, &branch, same_repo.then_some(remote.as_str()))?;
+                self.git_step(&format!("git switch {branch}"), || {
+                    self.git.switch_branch(dir, &branch, same_repo.then_some(remote.as_str()))
+                })?;
                 Ok(format!("Switched to {branch} (pull request #{number})."))
             }
         }
@@ -974,9 +1065,11 @@ impl GitHub {
             .git
             .current_branch(dir)
             .ok_or_else(|| anyhow!("Not on a branch."))?;
-        let pr: RestPull = self.api.send_json(
+        let path = format!("{}/pulls", self.repo_path(dir)?);
+        let pr: RestPull = self.op(&format!("Opening a pull request from {head} into {}", new.base), || {
+            self.api.send_json(
             "POST",
-            &format!("{}/pulls", self.repo_path(dir)?),
+            &path,
             &json!({
                 "title": new.title,
                 "body": new.body,
@@ -984,23 +1077,30 @@ impl GitHub {
                 "base": new.base,
                 "draft": new.draft,
             }),
-        )?;
+            )
+        })?;
         Ok(pr.html_url)
     }
 
     pub fn run_list(&self, dir: &Path, branch: &str) -> Result<Vec<Run>> {
         let base = self.repo_path(dir)?;
         let branch_q = branch.replace(' ', "%20");
-        let runs: Vec<RestRun> = self.api.get_paged(
-            &format!("{base}/actions/runs?branch={branch_q}&per_page=20"),
-            Some("workflow_runs"),
-            20,
-        )?;
+        let runs: Vec<RestRun> = self.op(&format!("Listing CI runs on {branch}"), || {
+            self.api.get_paged(
+                &format!("{base}/actions/runs?branch={branch_q}&per_page=20"),
+                Some("workflow_runs"),
+                20,
+            )
+        })?;
         Ok(runs.into_iter().map(run_from_rest).collect())
     }
 
     pub fn run_view(&self, dir: &Path, id: u64) -> Result<RunDetail> {
         let base = self.repo_path(dir)?;
+        self.op(&format!("Reading CI run {id}"), || self.run_view_inner(&base, id))
+    }
+
+    fn run_view_inner(&self, base: &str, id: u64) -> Result<RunDetail> {
         let run: RestRun = self.api.get(&format!("{base}/actions/runs/{id}"))?;
         let jobs: Vec<RestJob> = self.api.get_paged(
             &format!("{base}/actions/runs/{id}/jobs?per_page=100"),
@@ -1032,7 +1132,13 @@ impl GitHub {
     /// The logs of the run's failed jobs, one after the other.
     pub fn run_failed_log(&self, dir: &Path, id: u64) -> Result<String> {
         let base = self.repo_path(dir)?;
-        let detail = self.run_view(dir, id)?;
+        self.op(&format!("Downloading the failed job logs of run {id}"), || {
+            self.run_failed_log_inner(&base, id)
+        })
+    }
+
+    fn run_failed_log_inner(&self, base: &str, id: u64) -> Result<String> {
+        let detail = self.run_view_inner(base, id)?;
         let mut out = String::new();
         for job in detail.jobs.iter().filter(|j| j.state() == crate::gh::RunState::Failure) {
             let log = self.api.get_text(
@@ -1052,11 +1158,10 @@ impl GitHub {
     }
 
     pub fn run_rerun_failed(&self, dir: &Path, id: u64) -> Result<()> {
-        self.api.send(
-            "POST",
-            &format!("{}/actions/runs/{id}/rerun-failed-jobs", self.repo_path(dir)?),
-            &json!({}),
-        )
+        let path = format!("{}/actions/runs/{id}/rerun-failed-jobs", self.repo_path(dir)?);
+        self.op(&format!("Re-running the failed jobs of run {id}"), || {
+            self.api.send("POST", &path, &json!({}))
+        })
     }
 }
 
@@ -1234,6 +1339,43 @@ mod tests {
             private: false,
         });
         assert_eq!(created.ok().map(|c| c.clone_url).as_deref(), Some("https://github.com/acme/proj.git"));
+    }
+
+    #[test]
+    fn operations_are_logged_without_secrets() {
+        let log = GitHubLog::new();
+        let t = FakeTransport::default().answer(
+            "/user/repos",
+            422,
+            r#"{"message":"Repository creation failed.","errors":[{"field":"name","message":"name already exists on this account"}]}"#,
+        );
+        let g = GitHub::new(
+            Api::new(Arc::new(t), Some(Secret::new("ghp_secret_token"))).with_log(log.clone()),
+            Git::default(),
+        );
+        let _ = g.create_repo(&NewRepo {
+            org: None,
+            name: "proj".into(),
+            description: "a private description".into(),
+            private: true,
+        });
+        let text = log.text();
+        assert!(text.contains("▶ Creating repository your account/proj (private)"), "{text}");
+        assert!(text.contains("POST /user/repos → 422"), "{text}");
+        assert!(text.contains("✗ Creating repository your account/proj (private): "), "{text}");
+        // Neither the token nor the request body.
+        assert!(!text.contains("ghp_secret_token"), "{text}");
+        assert!(!text.contains("a private description"), "{text}");
+        // A request GitHub never answered.
+        let g = GitHub::new(
+            Api::new(Arc::new(FakeTransport::default()), None).with_log(log.clone()),
+            Git::default(),
+        );
+        log.clear();
+        let _ = g.user();
+        let text = log.text();
+        assert!(text.contains("GET /user → no answer"), "{text}");
+        assert!(text.contains("✗ Checking the signed-in account"), "{text}");
     }
 
     // JSON fixtures for every parsed type.

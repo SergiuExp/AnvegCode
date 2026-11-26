@@ -87,69 +87,76 @@ pub fn publish(
     commit_first: bool,
     cancel: &CancelToken,
 ) -> (Result<CreatedRepo>, Option<Entry>) {
+    let mut entry = None;
+    let label = format!("Publishing {} to GitHub as {}", pre.repo.display(), new.name);
+    let result = github.op(&label, || publish_steps(github, pre, new, commit_first, cancel, &mut entry));
+    (result, entry)
+}
+
+fn publish_steps(
+    github: &GitHub,
+    pre: &Precheck,
+    new: &NewRepo,
+    commit_first: bool,
+    cancel: &CancelToken,
+    entry: &mut Option<Entry>,
+) -> Result<CreatedRepo> {
     let git = &github.git;
     if let Some(outer) = &pre.inside {
-        return (
-            Err(anyhow!(
-                "This folder is inside another git repository ({}). Publish that repository, or move the folder out of it.",
-                outer.display()
-            )),
-            None,
+        bail!(
+            "This folder is inside another git repository ({}). Publish that repository, or move the folder out of it.",
+            outer.display()
         );
     }
     if let Some(url) = &pre.origin {
-        return (
-            Err(anyhow!(
-                "This project already has a remote named origin ({url}). Publishing stopped, so nothing changed."
-            )),
-            None,
-        );
+        bail!("This project already has a remote named origin ({url}). Publishing stopped, so nothing changed.");
     }
     if !pre.has_head && !commit_first {
-        return (Err(anyhow!("The project has no commits yet.")), None);
+        bail!("The project has no commits yet.");
     }
-    let created = match github.create_repo(new) {
-        Ok(c) => c,
-        Err(e) => return (Err(e), None),
-    };
+    let created = github.create_repo(new)?;
     let local = || -> Result<()> {
         if !pre.is_repo {
-            git.init(&pre.repo)?;
+            github.git_step("git init", || git.init(&pre.repo))?;
         }
         if !pre.has_head {
-            git.initial_commit(&pre.repo, "Initial commit").map_err(|e| {
-                anyhow!("Could not make the first commit: {e:#}\n(Is git's user.name and user.email set? Is the folder empty?)")
-            })?;
+            github
+                .git_step("git add --all && git commit -m \"Initial commit\"", || {
+                    git.initial_commit(&pre.repo, "Initial commit")
+                })
+                .map_err(|e| {
+                    anyhow!("Could not make the first commit: {e:#}\n(Is git's user.name and user.email set? Is the folder empty?)")
+                })?;
         }
-        git.add_remote(&pre.repo, "origin", &created.clone_url)
+        github.git_step(&format!("git remote add origin {}", created.clone_url), || {
+            git.add_remote(&pre.repo, "origin", &created.clone_url)
+        })
     };
     if let Err(e) = local() {
-        return (
-            Err(anyhow!(
-                "The repository was created on GitHub ({}), but setting up the project failed: {e:#}",
-                created.html_url
-            )),
-            None,
+        bail!(
+            "The repository was created on GitHub ({}), but setting up the project failed: {e:#}",
+            created.html_url
         );
     }
-    let (pushed, entry) = git_activity::run_logged(
-        git,
-        &pre.repo,
-        &NetworkOp::Push {
-            set_upstream: Some("origin".into()),
-        },
-        cancel,
-        None,
-    );
+    let pushed = github.git_step("git push --set-upstream origin HEAD", || {
+        let (pushed, e) = git_activity::run_logged(
+            git,
+            &pre.repo,
+            &NetworkOp::Push {
+                set_upstream: Some("origin".into()),
+            },
+            cancel,
+            None,
+        );
+        *entry = Some(e);
+        pushed
+    });
     match pushed {
-        Ok(_) => (Ok(created), Some(entry)),
-        Err(e) => (
-            Err(anyhow!(
-                "The repository was created on GitHub ({}) and added as origin, but the push failed: {e:#}\nPush again from the Git panel.",
-                created.html_url
-            )),
-            Some(entry),
-        ),
+        Ok(_) => Ok(created),
+        Err(e) => Err(anyhow!(
+            "The repository was created on GitHub ({}) and added as origin, but the push failed: {e:#}\nPush again from the Git panel.",
+            created.html_url
+        )),
     }
 }
 

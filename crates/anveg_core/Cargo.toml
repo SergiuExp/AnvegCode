@@ -25,6 +25,8 @@ nucleo-matcher.workspace = true
 similar.workspace = true
 ureq.workspace = true
 rustls.workspace = true
+futures.workspace = true
+jiff.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }

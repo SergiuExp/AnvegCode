@@ -972,3 +972,38 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] File ▸ Publish to GitHub… on a folder that is not a repository: asks about the first commit, then the repository appears on GitHub with the code.
 - [ ] File ▸ Open from GitHub…: pick a private repository, choose a folder, watch the progress, Cancel once, then clone and open.
 - [ ] `which gh` absent: everything above still works.
+
+## GitHub log (owner's request, 2026-11-26)
+
+**Done.** A log of everything the app does with GitHub, for when something goes wrong.
+- **Where:** a pane at the bottom of the GitHub tab, the Publish to GitHub tab and the Open from GitHub window (collapsed there). It is one log for the whole app, so a clone started from the welcome window is still in the project window's log.
+- **Controls:** the header collapses the pane. Collapsed, it shows the newest line, in red when it is a failure. It also has **Copy** (the whole log) and **Clear**.
+- **Selecting and copying:** the text is a read-only editor, so you can select with the mouse, use ⌘A / ⌘C, and search with ⌘F. While it has focus, new lines wait until focus leaves, so a selection never jumps. Otherwise it follows the newest line. Updates are batched every 120 ms.
+- **Memory only** (`anveg_core::github_log`): the newest 2,000 lines, gone on quit. The GitHub tab's once-a-minute refresh adds about 6 lines, so that is a few hours of history.
+- **What is logged:**
+  - **Operations:** `▶` when one starts, then `✓` with how long it took, or `✗` with the reason. They are: checking the account, listing organizations and repositories, reading a repository, listing pull requests, reading one (details, checks, diff), merge, close, ready, checkout, open a pull request, list CI runs, read a run, download failed logs, re-run, create a repository, publish and clone.
+  - **Requests inside them** (indented): method, path, status and time, or "no answer" with the network error. These come from `Api::request`, so every call is covered, including ones added later.
+  - **git steps inside Publish and PR checkout:** `git init`, the first commit, `git remote add`, `git push`, `git fetch` and `git switch`, each with ok or git's error.
+  - **Sign-in:** saved sign-in found or not; the token checked; signed in as whom; keychain save and read failures; device-flow code requested, browser opened, approved, slow-down, denied or expired; cancelled; signed out; and "GitHub answered 401" when a saved sign-in stops working.
+- **Never logged:** the token and request bodies (descriptions, PR text). Paths and URLs carry no secrets. A test checks both.
+
+**Tests:** operations and details, with watchers notified for each line; the 2,000-line cap; an API create that fails with 422 (the operation, its request, the failure, and neither the token nor the body); a request with no answer.
+
+**Verified under Xvfb** against the fake GitHub API:
+- **Sign-in:** a wrong token (✗ 401, "Not signed in…"), then the right one. Signed in as tester. The Linux test box has no keyring, and the keychain save failure showed in the log, which is the kind of problem the log is for.
+- **GitHub tab:** repository, pull requests and CI runs, each with its request. Refresh added new lines and scrolled to them.
+- **Selecting and copying:** dragging over lines selected them, and Ctrl+C copied exactly those lines. With the selection kept, a refresh did not move it; clicking elsewhere showed the new lines. Copy put the whole log on the clipboard, without the token.
+- **Failures:** opening a PR the fake server doesn't know showed ✗ lines with GitHub's 404 explanation. Collapsed, the pane showed that failure in red.
+- **Publish of a plain folder:** create (201), `git init`, the first commit, `git remote add`, `git push`, then ✓ Publishing (96 ms). The same lines were in the sidebar's log and the Publish tab's.
+- **Open from GitHub:** a missing repository (✗ with git's whole message), then a clone of repo2. Both were in the cloned project's GitHub log.
+
+**Not verified here:** the device-flow lines against github.com, and the macOS Keychain.
+
+**Manual checks (Mac)**
+- [ ] GitHub tab: the log pane at the bottom fills with lines as the tab loads; Refresh adds more.
+- [ ] Select a few lines with the mouse, ⌘C, paste elsewhere: exactly those lines. ⌘A ⌘C copies everything; the Copy button does too.
+- [ ] Keep a selection while the tab refreshes: it doesn't move; click elsewhere and the new lines appear.
+- [ ] Collapse the pane, cause a failure (e.g. turn Wi-Fi off and Refresh): the header shows the ✗ line in red.
+- [ ] Clear empties it. Quit and relaunch: the log starts empty.
+- [ ] Sign out and sign in with GitHub (device flow): each step is in the log, and the token is not.
+- [ ] Publish a folder, and clone with Open from GitHub: each step is logged (the Open window's log starts collapsed).

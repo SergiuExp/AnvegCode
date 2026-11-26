@@ -86,6 +86,11 @@ pub fn relative(then_millis: i64, now: i64) -> String {
 }
 
 /// `2026-11-23 18:54` in UTC, for tooltips.
+/// The local time of day, `HH:MM:SS` (UTC when the time zone is unknown).
+pub fn local_hms() -> String {
+    jiff::ZonedDateTime::now().strftime("%H:%M:%S").to_string()
+}
+
 pub fn format_utc(millis: i64) -> String {
     let secs = millis.div_euclid(1000);
     let days = secs.div_euclid(86_400);
