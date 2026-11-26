@@ -73,6 +73,8 @@ ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-pr
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Local time for the GitHub log (already in the tree via other crates).
 jiff = "=1.0.2"
+# Image dimensions for the image viewer (already in the tree via usvg).
+imagesize = "=0.14.0"
 # The GitHub token lives in the OS keychain, never in a file.
 keyring = { version = "=3.6.3", default-features = false }
 

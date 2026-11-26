@@ -508,8 +508,14 @@ impl Render for SettingsWindow {
                         cx,
                     ))
                     .child(self.row(
+                        "Save automatically",
+                        Some("A second after you stop typing, and when you switch tabs, windows or apps, close a file or quit."),
+                        self.switch("s-autosave", s.editor.autosave, |s, v| s.editor.autosave = v, cx),
+                        cx,
+                    ))
+                    .child(self.row(
                         "Format on save",
-                        Some("Uses the file's language server."),
+                        Some("Uses the file's language server. Runs on ⌘S, not on automatic saves."),
                         self.switch("s-fmt", s.editor.format_on_save, |s, v| s.editor.format_on_save = v, cx),
                         cx,
                     ))

@@ -1007,3 +1007,57 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] Clear empties it. Quit and relaunch: the log starts empty.
 - [ ] Sign out and sign in with GitHub (device flow): each step is in the log, and the token is not.
 - [ ] Publish a folder, and clone with Open from GitHub: each step is logged (the Open window's log starts collapsed).
+
+## Autosave and the image viewer (owner's request, 2026-11-26)
+
+**Done: autosave** (Settings ▸ Editor ▸ **Save automatically**, on by default; settings files written before this get it on too)
+- **When it saves:**
+  - 1 second after typing stops;
+  - when the editor loses focus (another tab, the terminal, the sidebar);
+  - when the window loses focus (another window or app);
+  - when the tab or window closes (no "Save changes?" question);
+  - on quit, including Dock ▸ Quit and logout. GPUI waits for these writes before the process ends.
+- **When it doesn't** (closing still asks, as before):
+  - a file changed on disk while edited here (the banner's Reload / Keep Mine / Compare decides);
+  - a file deleted on disk (it isn't silently recreated);
+  - read-only files.
+- **Format on save** runs only on ⌘S, so text never reformats under the cursor.
+- **Typing during a save:** the buffer stays dirty and saves again a second later. Before, finishing a save always marked the buffer clean.
+- **Fixed on the way:** "Save" then close (and Save All on quit) could lose the write, because closing dropped the editor before the write ran. The disk write now runs on its own and finishes even if the tab or window goes away.
+- **Unchanged:** the split diff's editable side keeps its own 0.6 s save.
+
+**Done: image viewer** (`image_view.rs`, `anveg_core::images`)
+- **Formats:** PNG, JPEG, GIF (animated), SVG, WebP, BMP, ICO, TIFF and Netpbm open as pictures instead of text. These are the ones GPUI decodes; AVIF and HEIC aren't, so they open as binary files.
+- **Toolbar:**
+  - **Fit** (the default) shrinks large images to the tab and never enlarges small ones.
+  - **100%**, **−** and **+** step through 10%–800%. Larger than the tab, the image scrolls, centred when smaller (auto margins, so no part is ever out of reach).
+  - **Light/Dark** backdrop, to see transparent parts.
+- **Info bar:** format, pixel size (the file header; SVG `width`/`height` or `viewBox`) and file size.
+- **Reloads** when the file changes on disk. The bytes are read into memory each time, so the image cache never shows a stale picture.
+- **SVG: Image / Source.** Source is the normal editor (highlighted like HTML, with autosave), and the picture follows each save. Unsaved-change checks, Save, Save All and closing all include that editor.
+- **Other cases:**
+  - files over 64 MB are not decoded (the viewer says so);
+  - a file that isn't really an image says "This PNG could not be decoded."
+- SVG, XML, XHTML and plist files are now highlighted as HTML in the editor.
+- New dependency: `imagesize =0.14.0` (MIT, already in the tree through `usvg`).
+
+**Tests:** extensions → kinds, SVG sizes (attributes, units, `viewBox`, and `stroke-width` not taken as `width`), PNG header size, byte sizes in words, the autosave default, and old settings files.
+
+**Verified under Xvfb:**
+- **Images:** a transparent PNG; a 3000 × 2000 PNG at Fit and at 100% (scrolls, padding on every side); a JPEG zoomed out to 75%; WebP; ICO; an animated GIF (frames sampled alternating); a broken `.png`; the Dark backdrop.
+- **SVG:** rendered; Source; a colour edit autosaved in about a second and the picture turned red.
+- **Autosave on:**
+  - typing then waiting: saved;
+  - typing then closing the tab within 0.15 s: saved and closed with no question;
+  - typing then quitting at once: saved.
+- **Autosave off:** nothing saved after 2.5 s or on focus loss, and closing asked "Save changes to README.md?".
+
+**Manual checks (Mac)**
+- [ ] Type in a file and stop: the tab's dot disappears after about a second, and `git status` shows the change.
+- [ ] Type, then at once ⌘-Tab to another app, switch tabs, or close the tab with ⌘W: saved each time, no question.
+- [ ] Type, then ⌘Q at once: saved.
+- [ ] Settings ▸ Editor ▸ Save automatically off: nothing saves until ⌘S, and closing asks.
+- [ ] Change a file outside the app while editing it here: the banner appears and autosave doesn't overwrite it.
+- [ ] Open a PNG, JPEG, GIF (animated), SVG, WebP and ICO from the Files tab: shown, with the right size in the info bar. Fit, 100%, −, + and Light/Dark work, and a big image scrolls with a trackpad in both directions.
+- [ ] SVG ▸ Source: edit, stop typing, then Image: the picture shows the change.
+- [ ] Replace an open image on disk (e.g. re-export it): the viewer updates.

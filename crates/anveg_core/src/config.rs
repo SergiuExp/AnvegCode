@@ -118,14 +118,28 @@ impl SessionButton {
 }
 
 /// Editor preferences (Settings ▸ Editor).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorPrefs {
     pub soft_wrap: bool,
     pub format_on_save: bool,
+    /// Save edited files by themselves: a moment after typing stops, when
+    /// the editor or the window loses focus, on closing and on quitting.
+    pub autosave: bool,
     /// Extra file types: extension (without the dot) or file name → the
     /// language to highlight it as. Added to the built-in list.
     pub file_types: BTreeMap<String, String>,
+}
+
+impl Default for EditorPrefs {
+    fn default() -> Self {
+        Self {
+            soft_wrap: false,
+            format_on_save: false,
+            autosave: true,
+            file_types: BTreeMap::new(),
+        }
+    }
 }
 
 /// The default language servers (next phases, 4.3).
@@ -581,6 +595,10 @@ mod tests {
         assert!(s.terminal.option_as_meta);
         assert_eq!(s.idle_stop_minutes, 30);
         assert!(!s.editor.format_on_save);
+        assert!(s.editor.autosave);
+        // Settings saved before autosave existed get it turned on.
+        let old: Settings = serde_json::from_str(r#"{"editor":{"soft_wrap":true}}"#).unwrap_or_default();
+        assert!(old.editor.soft_wrap && old.editor.autosave);
         assert_eq!(s.pull_mode, PullMode::FastForwardOnly);
         assert_eq!(
             s.lsp_command("typescript"),

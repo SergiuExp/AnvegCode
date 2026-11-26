@@ -214,6 +214,7 @@ dependencies = [
  "directories",
  "futures",
  "ignore",
+ "imagesize 0.14.0",
  "jiff",
  "keyring",
  "notify",

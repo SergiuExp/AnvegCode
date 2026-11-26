@@ -16,6 +16,7 @@ mod files_panel;
 mod git_panel;
 mod github;
 mod github_log_view;
+mod image_view;
 mod languages;
 mod lsp_manager;
 mod logging;
@@ -98,8 +99,19 @@ fn main() {
         // never ask.
         cx.on_app_quit(|cx| {
             let model = model(cx);
+            // Autosave the open editors; GPUI waits for these writes (up
+            // to its shutdown timeout) before the process ends.
+            let views: Vec<_> = model.read(cx).windows.iter().filter_map(|w| w.view.upgrade()).collect();
+            let writes: Vec<_> = views
+                .into_iter()
+                .flat_map(|v| v.update(cx, |v, cx| v.autosave_all(cx)))
+                .collect();
             model.update(cx, |m, cx| m.on_app_quit(cx));
-            async {}
+            async move {
+                for write in writes {
+                    write.await;
+                }
+            }
         })
         .detach();
 

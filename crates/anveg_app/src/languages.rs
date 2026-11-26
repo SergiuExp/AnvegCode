@@ -37,7 +37,7 @@ pub fn language_for(path: &Path, extra: &BTreeMap<String, String>) -> &'static s
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
         "md" | "markdown" | "mdx" => "markdown",
-        "html" | "htm" => "html",
+        "html" | "htm" | "svg" | "xml" | "xhtml" | "plist" => "html",
         "css" => "css",
         "sh" | "bash" | "zsh" => "bash",
         "swift" => "swift",

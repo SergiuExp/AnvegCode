@@ -627,8 +627,7 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &SaveFile, window, cx| {
                 // The editor handles ⌘S when it has focus; this is the menu.
                 if let Tab::Doc(i) = this.tab
-                    && let Some(crate::docs::DocView::Editor(e)) =
-                        this.docs.get(i).and_then(|d| d.view.clone())
+                    && let Some(e) = this.docs.get(i).and_then(|d| d.editor(cx))
                 {
                     e.update(cx, |e, cx| e.save(window, cx));
                 }

@@ -1679,6 +1679,10 @@ impl ProjectWindow {
     /// Whether the window may close now; when sessions are running (and
     /// the setting is on) this shows the confirmation and says no.
     pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Autosave: what can be saved is saved (even if closing stops).
+        for task in self.autosave_all(cx) {
+            task.detach();
+        }
         if self.close_confirmed || self.model.read(cx).quitting {
             self.stop_all(cx);
             return true;

@@ -19,6 +19,7 @@ use crate::session_buttons_view::SessionButtonsView;
 use crate::diff_view::{DiffSource, DiffView};
 use crate::split_diff_view::SplitDiffView;
 use crate::editor_view::EditorView;
+use crate::image_view::ImageView;
 use crate::github::{CreatePrView, LogView, PrView, RunView};
 use crate::project_window::{ProjectWindow, Tab};
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
@@ -27,6 +28,7 @@ use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
 #[derive(Clone)]
 pub enum DocView {
     Editor(Entity<EditorView>),
+    Image(Entity<ImageView>),
     Diff(Entity<DiffView>),
     SplitDiff(Entity<SplitDiffView>),
     Pr(Entity<PrView>),
@@ -40,9 +42,19 @@ pub enum DocView {
 }
 
 impl DocView {
+    /// The text editor in this view: an editor tab, or an SVG's source.
+    pub fn editor(&self, cx: &App) -> Option<Entity<EditorView>> {
+        match self {
+            Self::Editor(e) => Some(e.clone()),
+            Self::Image(v) => v.read(cx).editor(),
+            _ => None,
+        }
+    }
+
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self {
             Self::Editor(v) => v.read(cx).focus_handle(cx),
+            Self::Image(v) => v.read(cx).focus_handle(cx),
             Self::Diff(v) => v.read(cx).focus_handle(cx),
             Self::SplitDiff(v) => v.read(cx).focus_handle(cx),
             Self::Pr(v) => v.read(cx).focus_handle(cx),
@@ -59,6 +71,7 @@ impl DocView {
     pub fn element(&self) -> AnyElement {
         match self {
             Self::Editor(v) => v.clone().into_any_element(),
+            Self::Image(v) => v.clone().into_any_element(),
             Self::Diff(v) => v.clone().into_any_element(),
             Self::SplitDiff(v) => v.clone().into_any_element(),
             Self::Pr(v) => v.clone().into_any_element(),
@@ -89,13 +102,23 @@ impl DocTab {
         }
     }
 
+    pub fn editor(&self, cx: &App) -> Option<Entity<EditorView>> {
+        self.view.as_ref().and_then(|v| v.editor(cx))
+    }
+
     pub fn is_dirty(&self, cx: &App) -> bool {
-        matches!(&self.view, Some(DocView::Editor(e)) if e.read(cx).is_dirty())
+        self.editor(cx).is_some_and(|e| e.read(cx).is_dirty())
+    }
+
+    /// Unsaved edits that autosave won't take care of.
+    pub fn needs_asking(&self, cx: &App) -> bool {
+        self.editor(cx).is_some_and(|e| e.read(cx).needs_asking(cx))
     }
 
     pub fn title(&self, cx: &App) -> String {
         match (&self.view, &self.key) {
             (Some(DocView::Editor(e)), _) => e.read(cx).title(),
+            (Some(DocView::Image(v)), _) => v.read(cx).title(),
             (Some(DocView::Diff(d)), DocKey::GitDiff { .. } | DocKey::Compare { .. }) => {
                 d.read(cx).title()
             }
@@ -203,7 +226,11 @@ impl ProjectWindow {
         let view = match &key {
             DocKey::File { path } => {
                 let path = path.clone();
-                DocView::Editor(cx.new(|cx| EditorView::new(path, project, roots, window, cx)))
+                if anveg_core::images::kind_for(&path).is_some() {
+                    DocView::Image(cx.new(|cx| ImageView::new(path, project, roots, window, cx)))
+                } else {
+                    DocView::Editor(cx.new(|cx| EditorView::new(path, project, roots, window, cx)))
+                }
             }
             DocKey::GitDiff { repo, path, diff } => {
                 if self.model.read(cx).settings.diff_split {
@@ -302,6 +329,7 @@ impl ProjectWindow {
         };
         let sub = match &view {
             DocView::Editor(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
+            DocView::Image(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Diff(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::SplitDiff(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
             DocView::Pr(v) => cx.subscribe_in(v, window, Self::on_workspace_event),
@@ -324,7 +352,16 @@ impl ProjectWindow {
         let Some(doc) = self.docs.get(i) else {
             return;
         };
-        if doc.is_dirty(cx) {
+        // Autosave: save and close, no question.
+        if let Some(e) = doc.editor(cx)
+            && let Some(task) = e.update(cx, |e, cx| e.autosave_now(cx))
+        {
+            task.detach();
+        }
+        let Some(doc) = self.docs.get(i) else {
+            return;
+        };
+        if doc.needs_asking(cx) {
             let title = doc.title(cx);
             let key = doc.key.clone();
             let weak = cx.entity().downgrade();
@@ -346,7 +383,7 @@ impl ProjectWindow {
             .button("Save", ButtonStyle::Primary, move |_, window, cx| {
                 let _ = weak2.update(cx, |this, cx| {
                     if let Some(i) = this.doc_index(&key2)
-                        && let Some(DocView::Editor(e)) = this.docs[i].view.clone()
+                        && let Some(e) = this.docs[i].editor(cx)
                     {
                         e.update(cx, |e, cx| e.save(window, cx));
                         this.remove_doc(i, window, cx);
@@ -365,7 +402,7 @@ impl ProjectWindow {
             return;
         }
         let doc = self.docs.remove(i);
-        if let Some(DocView::Editor(e)) = &doc.view {
+        if let Some(e) = doc.editor(cx) {
             e.update(cx, |e, cx| e.closed(cx));
         }
         if matches!(&self.split, Some(PaneContent::Doc { doc: k }) if *k == doc.key) {
@@ -391,7 +428,7 @@ impl ProjectWindow {
     /// ⌘S on a window whose editor is not focused, and File ▸ Save All.
     pub fn save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for doc in &self.docs {
-            if let Some(DocView::Editor(e)) = &doc.view
+            if let Some(e) = doc.editor(cx)
                 && e.read(cx).is_dirty()
             {
                 e.update(cx, |e, cx| e.save(window, cx));
@@ -399,10 +436,26 @@ impl ProjectWindow {
         }
     }
 
+    /// Start the autosaves of every editor that has some pending. The
+    /// writes finish even if the window closes; quitting awaits them.
+    pub fn autosave_all(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::Task<()>> {
+        let editors: Vec<_> = self
+            .docs
+            .iter()
+            .filter_map(|d| d.editor(cx))
+            .collect();
+        editors
+            .into_iter()
+            .filter_map(|e| e.update(cx, |e, cx| e.autosave_now(cx)))
+            .collect()
+    }
+
+    /// Files with unsaved changes that closing must ask about (autosave
+    /// covers the rest).
     pub fn dirty_doc_names(&self, cx: &App) -> Vec<String> {
         self.docs
             .iter()
-            .filter(|d| d.is_dirty(cx))
+            .filter(|d| d.needs_asking(cx))
             .map(|d| d.title(cx))
             .collect()
     }

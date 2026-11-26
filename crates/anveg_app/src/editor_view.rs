@@ -8,9 +8,14 @@
 //!   kept); a dirty one shows "This file changed on disk" with Reload, Keep
 //!   Mine and Compare.
 //! - Language servers through [`crate::lsp_manager`].
+//! - Autosave (Settings ▸ Editor, on by default): a second after typing
+//!   stops, when the editor or the window loses focus, on closing the tab
+//!   or window and on quitting. Never for a file changed or deleted on disk
+//!   while edited here (that still asks), and never formats.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use anveg_core::config::DocKey;
 use anveg_core::files::{self, Indent, LineEnding, LoadedText, ReadOnlyReason};
@@ -35,6 +40,9 @@ use crate::lsp_manager::{LspEvent, LspManager, LspProvider, OpenRequest, ServerK
 use crate::model::model;
 use crate::ui::Colors;
 use crate::workspace::WorkspaceEvent;
+
+/// How long after the last edit an autosave happens.
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(1000);
 
 /// The key context of an editor tab.
 pub const EDITOR_CONTEXT: &str = "CodeEditorTab";
@@ -74,6 +82,8 @@ pub struct EditorView {
     pending_jump: Option<(u32, Option<u32>)>,
     focus: FocusHandle,
     saving: bool,
+    /// The pending autosave (restarted by every edit).
+    autosave_task: Option<Task<()>>,
     _watch: Option<fswatch::Subscription>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
@@ -125,6 +135,7 @@ impl EditorView {
             pending_jump: None,
             focus: cx.focus_handle(),
             saving: false,
+            autosave_task: None,
             _watch: None,
             _tasks: Vec::new(),
             _subs: Vec::new(),
@@ -133,6 +144,12 @@ impl EditorView {
         this.watch(window, cx);
         let lsp = model(cx).read(cx).lsp.clone();
         this._subs.push(cx.subscribe_in(&lsp, window, Self::on_lsp_event));
+        // Switching to another app or window saves.
+        this._subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.autosave_detached(cx);
+            }
+        }));
         this
     }
 
@@ -231,6 +248,11 @@ impl EditorView {
                     this.text_changed(&text, cx);
                 }
             }));
+        // Leaving the editor (another tab, the terminal, the sidebar) saves.
+        let focus = state.read(cx).focus_handle(cx);
+        self._subs.push(cx.on_focus_out(&focus, window, |this, _, _, cx| {
+            this.autosave_detached(cx);
+        }));
         self.saved_text = loaded.text.clone();
         self.meta = Some(FileMeta {
             line_ending: loaded.line_ending,
@@ -358,7 +380,62 @@ impl EditorView {
             cx.emit(WorkspaceEvent::TitleChanged);
         }
         self.sync_lsp(text, cx);
+        self.schedule_autosave(cx);
         cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Autosave
+    // -----------------------------------------------------------------
+
+    /// Whether unsaved edits here are saved without asking: autosave is on,
+    /// the file is writable, and nobody changed or deleted it on disk
+    /// meanwhile (that still asks).
+    pub fn can_autosave(&self, cx: &App) -> bool {
+        self.dirty
+            && self.disk == DiskState::Same
+            && self.meta.as_ref().is_some_and(|m| m.read_only.is_none())
+            && model(cx).read(cx).settings.editor.autosave
+    }
+
+    /// Unsaved edits that closing should ask about.
+    pub fn needs_asking(&self, cx: &App) -> bool {
+        self.dirty && !self.can_autosave(cx)
+    }
+
+    /// Save a second after the last edit.
+    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        if !self.can_autosave(cx) {
+            self.autosave_task = None;
+            return;
+        }
+        self.autosave_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AUTOSAVE_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.saving {
+                    // Our previous write is still landing: try again.
+                    this.schedule_autosave(cx);
+                } else {
+                    this.autosave_detached(cx);
+                }
+            });
+        }));
+    }
+
+    /// Save now if autosave applies. The returned write finishes even if
+    /// this editor goes away (closing, quitting); await it or detach it.
+    pub fn autosave_now(&mut self, cx: &mut Context<Self>) -> Option<Task<()>> {
+        if !self.can_autosave(cx) {
+            return None;
+        }
+        self.autosave_task = None;
+        self.write(cx)
+    }
+
+    fn autosave_detached(&mut self, cx: &mut Context<Self>) {
+        if let Some(task) = self.autosave_now(cx) {
+            task.detach();
+        }
     }
 
     // -----------------------------------------------------------------
@@ -378,30 +455,47 @@ impl EditorView {
             && self.lsp_status == Some(ServerStatus::Ready);
         if format_first {
             self.format(true, window, cx);
-        } else {
-            self.write(window, cx);
+        } else if let Some(task) = self.write(cx) {
+            task.detach();
         }
     }
 
-    fn write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Write the buffer to disk. The returned task is the write itself: it
+    /// finishes even if this view is dropped meanwhile (so closing a tab
+    /// right after saving loses nothing). Detach or await it.
+    fn write(&mut self, cx: &mut Context<Self>) -> Option<Task<()>> {
         let (Some(meta), Some(state)) = (&self.meta, &self.state) else {
-            return;
+            return None;
         };
         let text = state.read(cx).value().to_string();
         let path = self.path.clone();
         let (le, nl) = (meta.line_ending, meta.trailing_newline);
         self.saving = true;
         let body = text.clone();
-        let task = cx.background_spawn(async move { files::save_text(&path, &body, le, nl) });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let disk = cx.background_spawn(async move {
+            let result = files::save_text(&path, &body, le, nl);
+            if let Err(error) = &result {
+                tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "could not save");
+            }
+            let _ = tx.send(result);
+        });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
                 this.saving = false;
                 match result {
                     Ok(()) => {
                         this.saved_text = text;
-                        this.dirty = false;
+                        // Typing may have gone on while the write ran.
+                        let current = this.text(cx);
+                        this.dirty = current != this.saved_text;
                         this.disk = DiskState::Same;
+                        if this.dirty {
+                            this.schedule_autosave(cx);
+                        }
                         if let Some(key) = this.lsp.clone() {
                             let path = this.path.clone();
                             model(cx)
@@ -421,6 +515,7 @@ impl EditorView {
                 cx.notify();
             });
         }));
+        Some(disk)
     }
 
     // -----------------------------------------------------------------
@@ -613,7 +708,9 @@ impl EditorView {
     fn format(&mut self, then_save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(key), Some(meta)) = (self.lsp.clone(), &self.meta) else {
             if then_save {
-                self.write(window, cx);
+                if let Some(task) = self.write(cx) {
+                    task.detach();
+                }
             } else {
                 cx.emit(WorkspaceEvent::Toast(
                     "No language server for this file.".into(),
@@ -642,8 +739,8 @@ impl EditorView {
                     }
                     Err(error) => cx.emit(WorkspaceEvent::Toast(format!("{error:#}").into())),
                 }
-                if then_save {
-                    this.write(window, cx);
+                if then_save && let Some(task) = this.write(cx) {
+                    task.detach();
                 }
             });
         }));
