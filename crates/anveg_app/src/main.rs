@@ -5,6 +5,7 @@
 //! the right. See `docs/build-plan.md`.
 
 mod actions;
+mod activity_view;
 mod app_assets;
 mod component_theme;
 mod dialogs;

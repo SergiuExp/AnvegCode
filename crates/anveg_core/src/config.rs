@@ -406,6 +406,12 @@ pub enum DocKey {
         to: String,
         title: String,
     },
+    /// One Git activity log entry's details (not restored after a
+    /// restart).
+    ActivityDetails {
+        id: String,
+        title: String,
+    },
     /// The project's toolbar commands editor.
     Commands,
     /// The editor for the custom buttons above Claude sessions (global).
@@ -424,7 +430,7 @@ pub enum DocKey {
 impl DocKey {
     /// Whether this tab comes back after a restart.
     pub fn restorable(&self) -> bool {
-        !matches!(self, Self::Compare { .. })
+        !matches!(self, Self::Compare { .. } | Self::ActivityDetails { .. })
     }
 }
 

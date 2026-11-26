@@ -1612,14 +1612,58 @@ impl GitPanel {
             for (j, (line, change)) in changes.into_iter().enumerate() {
                 card = card.child(self.render_ref_change(&e.repo, line, change, (i, j), cx));
             }
-            if !e.ok && !e.message.is_empty() {
-                let text: String = e.message.lines().take(4).collect::<Vec<_>>().join("\n");
+            let details = DocKey::ActivityDetails {
+                id: e.id.clone(),
+                title: format!(
+                    "{} {}",
+                    e.op.label(),
+                    if e.ok { "details" } else { "failed" }
+                ),
+            };
+            if !e.ok {
+                // The failure in plain words; click for everything.
+                let x = git_activity::explain(&e.message, e.op);
+                let key = details.clone();
                 card = card.child(
                     div()
+                        .id(SharedString::from(format!("act-err-{i}")))
+                        .ml(px(18.))
+                        .mt_0p5()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(c.destructive.opacity(0.08))
+                        .cursor_pointer()
+                        .hover(|el| el.bg(c.destructive.opacity(0.14)))
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(div().text_xs().text_color(c.destructive).child(x.title))
+                        .children(x.hint.map(|h| div().text_xs().child(h)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child("Details: git's full output…"),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(WorkspaceEvent::OpenDoc(key.clone()))
+                        })),
+                );
+            } else {
+                let key = details.clone();
+                card = card.child(
+                    div()
+                        .id(SharedString::from(format!("act-details-{i}")))
                         .pl(px(18.))
                         .text_xs()
-                        .text_color(c.destructive)
-                        .child(text),
+                        .text_color(c.muted_foreground)
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(c.foreground))
+                        .child("Details…")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(WorkspaceEvent::OpenDoc(key.clone()))
+                        })),
                 );
             }
             list = list.child(card);

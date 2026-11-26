@@ -410,30 +410,7 @@ impl Git {
         cancel: &CancelToken,
         progress: Option<process::Progress>,
     ) -> Result<String> {
-        let args: Vec<String> = match op {
-            NetworkOp::Fetch => vec!["fetch".into(), "--all".into(), "--prune".into()],
-            NetworkOp::Pull { mode } => {
-                let mut a = vec!["pull".to_owned()];
-                a.push(
-                    match mode {
-                        PullMode::FastForwardOnly => "--ff-only",
-                        PullMode::Merge => "--no-rebase",
-                        PullMode::Rebase => "--rebase",
-                    }
-                    .into(),
-                );
-                a
-            }
-            NetworkOp::Push { set_upstream } => match set_upstream {
-                Some(remote) => vec![
-                    "push".into(),
-                    "--set-upstream".into(),
-                    remote.clone(),
-                    "HEAD".into(),
-                ],
-                None => vec!["push".into()],
-            },
-        };
+        let args = network_args(op);
         let cmd = self
             .write_cmd(repo)
             .args(args)
@@ -1095,6 +1072,35 @@ pub fn copy_to_trash(path: &Path) -> Result<()> {
     std::fs::copy(path, &copy).with_context(|| format!("could not copy {}", path.display()))?;
     trash::delete(&copy).context("could not move the copy to the Trash")?;
     Ok(())
+}
+
+/// The arguments of a network command (`git` excluded; `--progress` is
+/// added when it runs).
+pub fn network_args(op: &NetworkOp) -> Vec<String> {
+    match op {
+        NetworkOp::Fetch => vec!["fetch".into(), "--all".into(), "--prune".into()],
+        NetworkOp::Pull { mode } => {
+            let mut a = vec!["pull".to_owned()];
+            a.push(
+                match mode {
+                    PullMode::FastForwardOnly => "--ff-only",
+                    PullMode::Merge => "--no-rebase",
+                    PullMode::Rebase => "--rebase",
+                }
+                .into(),
+            );
+            a
+        }
+        NetworkOp::Push { set_upstream } => match set_upstream {
+            Some(remote) => vec![
+                "push".into(),
+                "--set-upstream".into(),
+                remote.clone(),
+                "HEAD".into(),
+            ],
+            None => vec!["push".into()],
+        },
+    }
 }
 
 #[cfg(unix)]

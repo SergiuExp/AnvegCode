@@ -91,8 +91,11 @@ pub struct Entry {
     /// The branch checked out at the time.
     pub branch: Option<String>,
     pub ok: bool,
-    /// What git printed (progress lines dropped).
+    /// What git printed.
     pub message: String,
+    /// The command that ran, e.g. `git push --set-upstream origin HEAD`.
+    #[serde(default)]
+    pub command: String,
     /// Push: the remote branches it updated.
     #[serde(default)]
     pub sent: Vec<RefChange>,
@@ -297,6 +300,7 @@ pub fn entry(
         branch,
         ok,
         message: message.trim().to_owned(),
+        command: String::new(),
         sent,
         received,
         local,
@@ -318,8 +322,146 @@ pub fn run_logged(
     let before = refs(git, repo);
     let result = git.network(repo, op, cancel, progress);
     let after = refs(git, repo);
-    let entry = entry(git, repo, Op::of(op), branch, &before, &after, &result);
+    let mut entry = entry(git, repo, Op::of(op), branch, &before, &after, &result);
+    entry.command = format!("git {}", crate::git::network_args(op).join(" "));
     (result, entry)
+}
+
+/// A failure in plain words: what happened and what to do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Explanation {
+    pub title: String,
+    pub hint: Option<String>,
+}
+
+/// Explain git's message for a failed push, pull or fetch. Known failures
+/// get a sentence and a suggestion; anything else, git's own first error
+/// line.
+pub fn explain(message: &str, op: Op) -> Explanation {
+    let m = message.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
+    let e = |title: &str, hint: &str| Explanation {
+        title: title.to_owned(),
+        hint: Some(hint.to_owned()),
+    };
+    if has(&["cancelled"]) && !has(&["fatal:", "error:"]) {
+        return Explanation {
+            title: "Cancelled.".to_owned(),
+            hint: None,
+        };
+    }
+    if has(&["[rejected]", "non-fast-forward", "fetch first", "updates were rejected"]) {
+        return e(
+            "The remote has commits you don't have.",
+            "Pull first (bringing those commits in), then push again.",
+        );
+    }
+    if has(&["[remote rejected]", "pre-receive hook declined", "protected branch"]) {
+        return e(
+            "The remote refused the push.",
+            "The branch may be protected, or a server-side check failed. See the details for the server's reason.",
+        );
+    }
+    if has(&[
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "permission denied (publickey)",
+        "git could not sign in",
+        "invalid username or password",
+        "terminal prompts disabled",
+    ]) {
+        return e(
+            "Git could not sign in to the remote.",
+            "Set up a credential helper (for example `gh auth setup-git`) or an SSH key, or run the command once in the Terminal tab to sign in.",
+        );
+    }
+    if has(&["repository not found", "does not appear to be a git repository", "not found"])
+        && has(&["fatal:", "error:", "remote"])
+    {
+        return e(
+            "The remote repository was not found.",
+            "Check the remote's address (`git remote -v`) and that you have access to it.",
+        );
+    }
+    if has(&[
+        "could not resolve host",
+        "unable to access",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "operation timed out",
+        "failed to connect",
+    ]) {
+        return e(
+            "Could not reach the remote.",
+            "Check your network connection (or VPN) and try again.",
+        );
+    }
+    if has(&["timed out after"]) {
+        return e(
+            "Git took too long and was stopped.",
+            "Try again; for a large repository, run the command in the Terminal tab.",
+        );
+    }
+    if has(&["not possible to fast-forward", "diverging branches", "have diverged"]) {
+        return e(
+            "Your branch and the remote branch have both changed.",
+            "Pull with merge or rebase (Settings ▸ Git ▸ Pull), or combine them yourself in the Terminal tab.",
+        );
+    }
+    if has(&["would be overwritten by merge", "would be overwritten by checkout", "your local changes to the following files"]) {
+        return e(
+            "Uncommitted changes are in the way.",
+            "Commit or stash your changes to the files listed in the details, then pull again.",
+        );
+    }
+    if has(&["conflict", "automatic merge failed", "could not apply"]) {
+        return e(
+            "The pull stopped with conflicts.",
+            "Resolve the conflicted files (Git ▸ Changes), then commit; or abort with `git merge --abort` / `git rebase --abort` in the Terminal tab.",
+        );
+    }
+    if has(&["has no upstream branch", "no tracking information", "there is no tracking information"]) {
+        return e(
+            "This branch has no remote branch to pull from.",
+            "Push it first (that publishes it), or set its upstream in the Terminal tab.",
+        );
+    }
+    if has(&["src refspec", "does not match any"]) {
+        return e(
+            "There is nothing to push on this branch yet.",
+            "Make a commit first.",
+        );
+    }
+    if has(&["no such remote", "no configured push destination", "no remote"]) {
+        return e(
+            "This repository has no remote to use.",
+            "Add one with `git remote add origin <url>` in the Terminal tab.",
+        );
+    }
+    // Git's own words: its first fatal/error line, else the first line
+    // that is not a hint or progress.
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or_else(|| {
+            message
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("hint:") && !l.contains('\r'))
+        })
+        .unwrap_or("Git reported an error.");
+    let line = line
+        .trim_start_matches("fatal:")
+        .trim_start_matches("error:")
+        .trim();
+    let mut title = format!("{} failed: {line}", op.label());
+    if !title.ends_with('.') {
+        title.push('.');
+    }
+    Explanation { title, hint: None }
 }
 
 #[cfg(test)]
@@ -408,6 +550,7 @@ mod tests {
                 branch: None,
                 ok: true,
                 message: String::new(),
+                command: String::new(),
                 sent: Vec::new(),
                 received: Vec::new(),
                 local: None,
@@ -423,5 +566,26 @@ mod tests {
         let files = parse_file_lines(&lines);
         assert_eq!(files[1].status, "R");
         assert_eq!(files[1].path, "new.rs");
+    }
+
+    #[test]
+    fn explains_common_failures() {
+        let rejected = "To /tmp/remote.git\n ! [rejected]        feature-x -> feature-x (fetch first)\n\
+                        error: failed to push some refs to '/tmp/remote.git'\nhint: Updates were rejected";
+        assert_eq!(explain(rejected, Op::Push).title, "The remote has commits you don't have.");
+        let auth = "remote: Invalid username or password.\nfatal: Authentication failed for 'https://x/y.git/'";
+        assert_eq!(explain(auth, Op::Push).title, "Git could not sign in to the remote.");
+        let nowhere = "fatal: 'nowhere' does not appear to be a git repository\nfatal: Could not read from remote repository.";
+        assert_eq!(explain(nowhere, Op::Push).title, "The remote repository was not found.");
+        let host = "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com";
+        assert_eq!(explain(host, Op::Fetch).title, "Could not reach the remote.");
+        let ff = "hint: Diverging branches can't be fast-forwarded\nfatal: Not possible to fast-forward, aborting.";
+        assert!(explain(ff, Op::Pull).title.starts_with("Your branch and the remote branch"));
+        let dirty = "error: Your local changes to the following files would be overwritten by merge:\n\tsrc/a.rs";
+        assert_eq!(explain(dirty, Op::Pull).title, "Uncommitted changes are in the way.");
+        // Unknown: git's own first error line, readable.
+        let other = "warning: something\nfatal: the frobnicator is broken";
+        assert_eq!(explain(other, Op::Fetch).title, "Fetch failed: the frobnicator is broken.");
+        assert!(explain(rejected, Op::Push).hint.is_some());
     }
 }
