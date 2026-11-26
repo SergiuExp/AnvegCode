@@ -258,11 +258,19 @@ impl ProjectWindow {
                                         window.remove_window();
                                     }
                                 } else {
-                                    let _ = close_handle.update(cx, |_, window, cx| {
-                                        let _ = close_view.update(cx, |v, cx| {
-                                            if v.should_close(window, cx) {
-                                                window.remove_window();
-                                            }
+                                    // After this click: closing a tab makes
+                                    // macOS resize this window at once, which
+                                    // GPUI drops (and logs "window not found")
+                                    // while this window is handling the click.
+                                    let (close_handle, close_view) =
+                                        (close_handle, close_view.clone());
+                                    cx.defer(move |cx| {
+                                        let _ = close_handle.update(cx, |_, window, cx| {
+                                            let _ = close_view.update(cx, |v, cx| {
+                                                if v.should_close(window, cx) {
+                                                    window.remove_window();
+                                                }
+                                            });
                                         });
                                     });
                                 }
