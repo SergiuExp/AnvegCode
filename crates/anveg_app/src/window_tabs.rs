@@ -1,9 +1,10 @@
 //! The window tabs shown across the top of a full-screen project window:
 //! one tab per open project window, so you can switch between them
 //! without leaving full screen (macOS hides its own window tab bar there
-//! until the pointer reaches the top edge). The row also holds an Exit Full
-//! Screen button, since the app hides macOS's slide-down title bar in full
-//! screen (it covered the app's own top rows; see `platform`).
+//! until the pointer reaches the top edge). It starts with the window
+//! buttons (close, minimize, exit full screen), drawn like macOS's, since
+//! the app hides macOS's slide-down title bar in full screen (it covered
+//! the app's own top rows; see `platform`).
 //!
 //! Order: the windows in this window's macOS tab group first, in their tab
 //! order, then any other project windows (in another full-screen space, or
@@ -12,18 +13,18 @@
 use gpui_cn::prelude::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, Context, InteractiveElement as _, IntoElement,
+    AnyElement, AnyWindowHandle, Context, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    hsla, px, rgb, WeakEntity,
 };
 
-use crate::actions::CloseWindow;
 use crate::model::model;
 use crate::project_window::ProjectWindow;
 use crate::ui::Colors;
 
 struct WindowTab {
     handle: AnyWindowHandle,
+    view: WeakEntity<ProjectWindow>,
     name: String,
     path: String,
     needs_input: bool,
@@ -55,6 +56,7 @@ impl ProjectWindow {
                 let project = m.projects.get(w.project_id);
                 WindowTab {
                     handle: w.handle,
+                    view: w.view.clone(),
                     name: project.map(|p| p.name.clone()).unwrap_or_default(),
                     path: project
                         .map(|p| p.main_folder.display().to_string())
@@ -77,6 +79,94 @@ impl ProjectWindow {
             .map(|t| t.id)
             .collect();
         order_by_group(tabs, &group, |t| t.handle.window_id())
+    }
+
+    /// Close, minimize and exit full screen, as macOS draws them: red,
+    /// grey (minimize does not apply in full screen, as on macOS) and
+    /// green, with their glyphs while the pointer is over them.
+    fn window_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hovered = self.window_buttons_hovered;
+        let dark = cx.theme().is_dark();
+        let glyph_color = hsla(0., 0., 0., 0.6);
+        let light = |id: &'static str,
+                     color: Hsla,
+                     border: Hsla,
+                     glyph: Option<IconName>,
+                     tip: &'static str| {
+            div()
+                .id(id)
+                .size(px(12.))
+                .rounded_full()
+                .bg(color)
+                .border_1()
+                .border_color(border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(move |_, cx| crate::ui::LinesTooltip::build(vec![tip.to_owned()], cx))
+                .when_some(glyph.filter(|_| hovered), |el, glyph| {
+                    el.child(
+                        Icon::from(glyph)
+                            .size(px(8.))
+                            .text_color(glyph_color),
+                    )
+                })
+        };
+        let grey = if dark {
+            (hsla(0., 0., 0.30, 1.), hsla(0., 0., 0.25, 1.))
+        } else {
+            (hsla(0., 0., 0.82, 1.), hsla(0., 0., 0.74, 1.))
+        };
+        div()
+            .id("window-buttons")
+            .h_full()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(8.))
+            .pr(px(12.))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.window_buttons_hovered != *hovered {
+                    this.window_buttons_hovered = *hovered;
+                    cx.notify();
+                }
+            }))
+            .child(
+                light(
+                    "window-close",
+                    rgb(0xff5f57).into(),
+                    rgb(0xe0443e).into(),
+                    Some(IconName::Close),
+                    "Close Window",
+                )
+                .cursor_pointer()
+                // As ⌘W (asks about running sessions and unsaved files).
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.should_close(window, cx) {
+                        window.remove_window();
+                    }
+                })),
+            )
+            .child(light(
+                "window-minimize",
+                grey.0,
+                grey.1,
+                None,
+                "Minimize is not available in full screen",
+            ))
+            .child(
+                light(
+                    "window-fullscreen",
+                    rgb(0x28c840).into(),
+                    rgb(0x1aab29).into(),
+                    Some(IconName::Minimize2),
+                    "Exit Full Screen (⌃⌘F)",
+                )
+                .cursor_pointer()
+                .on_click(cx.listener(|_, _, window, _| window.toggle_fullscreen())),
+            )
+            .into_any_element()
     }
 
     /// The row, when the window is full screen.
@@ -102,10 +192,12 @@ impl ProjectWindow {
             .border_b_1()
             .border_color(c.border)
             .overflow_x_scroll();
+        row = row.child(self.window_buttons(cx));
         for (i, tab) in self.window_tabs(window, cx).into_iter().enumerate() {
             let current = tab.handle.window_id() == me;
             let handle = tab.handle;
             let close_handle = tab.handle;
+            let close_view = tab.view.clone();
             let name = if tab.name.is_empty() {
                 "Project".to_owned()
             } else {
@@ -159,32 +251,26 @@ impl ProjectWindow {
                             .size(ButtonSize::Xs)
                             .icon(Icon::from(IconName::Close))
                             .tooltip("Close Window")
-                            .on_click(cx.listener(move |_, _, window, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 if current {
-                                    window.dispatch_action(Box::new(CloseWindow), cx);
+                                    if this.should_close(window, cx) {
+                                        window.remove_window();
+                                    }
                                 } else {
                                     let _ = close_handle.update(cx, |_, window, cx| {
-                                        window.dispatch_action(Box::new(CloseWindow), cx)
+                                        let _ = close_view.update(cx, |v, cx| {
+                                            if v.should_close(window, cx) {
+                                                window.remove_window();
+                                            }
+                                        });
                                     });
                                 }
                             })),
                     ),
             );
         }
-        Some(
-            row.child(div().flex_1())
-                .child(
-                    div().h_full().flex().items_center().child(
-                        Button::new("exit-fullscreen")
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .icon(Icon::from(IconName::Minimize2))
-                            .tooltip("Exit Full Screen (⌃⌘F)")
-                            .on_click(cx.listener(|_, _, window, _| window.toggle_fullscreen())),
-                    ),
-                )
-                .into_any_element(),
+        Some(row.into_any_element(),
         )
     }
 }

@@ -219,6 +219,9 @@ pub struct ProjectWindow {
     pub toast: Option<SharedString>,
     toast_task: Option<Task<()>>,
     pub context_menu: Entity<MenuState>,
+    /// The pointer is over the full-screen window buttons (they show their
+    /// glyphs, as macOS's do).
+    pub window_buttons_hovered: bool,
     /// The “⋯” menus of the session bars: main pane, split pane.
     pub session_menus: [Entity<MenuState>; 2],
     close_confirmed: bool,
@@ -424,6 +427,7 @@ impl ProjectWindow {
             toast_task: None,
             context_menu,
             session_menus,
+            window_buttons_hovered: false,
             close_confirmed: false,
             unsaved_ok: false,
             pending_resume: resume,
