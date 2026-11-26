@@ -1796,6 +1796,10 @@ impl ProjectWindow {
         }
         if before != after {
             if let Some(kind) = status::announcement(before, after) {
+                if matches!(kind, status::Announcement::Finished) {
+                    let looking = window.is_window_active() && self.is_session_visible(&key);
+                    crate::sound::finished(looking, cx);
+                }
                 self.announce(&key, kind, window, cx);
             }
             self.reschedule_idle(&key, cx);

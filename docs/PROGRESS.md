@@ -821,3 +821,20 @@ The owner reported that the welcome window's red button only seemed to minimize 
 - [ ] Welcome window in full screen: moving to the top shows the window buttons; green leaves full screen.
 - [ ] Project windows in full screen still have no slide-down bar.
 - [ ] File ▸ Open Project… (⌘O) opens the folder picker.
+
+---
+
+## Chime when Claude finishes (owner's request, 2026-11-26)
+
+**Done**
+- When a session goes from working to idle (Claude finished its turn, the same moment as the "Finished" notification), the app plays a **soft, low two-note chime**: G3 then C3 a fifth below, each a struck-bowl tone (fundamental with a slowly beating twin, three fading overtones, 6 ms attack, exponential decay), 2.4 s, peak about -7 dBFS.
+- It is synthesised in code (`anveg_core::chime`, a 16-bit mono WAV), written once to `<app data>/sounds/finished-v1.wav`, and played with macOS's `/usr/bin/afplay` on a background thread (Linux, for development: `paplay`, else `aplay`). No audio library and no new dependency. Several sessions finishing within 1.5 s give one chime.
+- **Settings ▸ Status and resources ▸ Sound when Claude finishes:** Off / When away (only when that session is not in front of you: its window is not active or it is not shown in a pane) / **Always** (default), with ▷ to hear it.
+
+**Verified under Xvfb:** a fake session finishing a turn writes the WAV and runs the player (none is installed in the container, so nothing is heard there). Unit tests check the WAV header and length, the peak level, a click-free start, a silent end, and that the low note still rings after a second.
+
+**Manual checks (Mac)**
+- [ ] Settings ▸ ▷ plays the chime.
+- [ ] A session finishing a turn plays it once (Always).
+- [ ] When away: no chime while you watch the session; a chime when it is hidden or the app is in the background.
+- [ ] Off: silent.

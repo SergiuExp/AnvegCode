@@ -29,6 +29,7 @@ mod settings_window;
 mod session_buttons_view;
 mod session_toolbar;
 mod sidebar;
+mod sound;
 mod ui;
 mod welcome;
 mod window_tabs;

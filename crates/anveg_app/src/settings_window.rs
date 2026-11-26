@@ -489,6 +489,49 @@ impl Render for SettingsWindow {
                         cx,
                     ))
                     .child(self.row(
+                        "Sound when Claude finishes",
+                        Some("A soft low chime at the end of each turn."),
+                        {
+                            use anveg_core::config::FinishSound;
+                            let mut row = div().flex().items_center().gap_1();
+                            for (choice, label) in [
+                                (FinishSound::Off, "Off"),
+                                (FinishSound::WhenNotLooking, "When away"),
+                                (FinishSound::Always, "Always"),
+                            ] {
+                                row = row.child(
+                                    gpui_cn::Button::new(gpui_kit::SharedString::from(format!("sound-{label}")))
+                                        .ghost()
+                                        .size(gpui_cn::ButtonSize::Sm)
+                                        .label(label)
+                                        .toggled(s.finish_sound == choice)
+                                        .tooltip(match choice {
+                                            FinishSound::Off => "No sound",
+                                            FinishSound::WhenNotLooking => {
+                                                "Only when that session is not in front of you"
+                                            }
+                                            FinishSound::Always => "Every time a session finishes",
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.model.update(cx, |m, cx| {
+                                                m.update_settings(cx, |s| s.finish_sound = choice)
+                                            })
+                                        })),
+                                );
+                            }
+                            row.child(
+                                gpui_cn::Button::new("sound-preview")
+                                    .ghost()
+                                    .size(gpui_cn::ButtonSize::Sm)
+                                    .icon(gpui_cn::Icon::from(gpui_kit::assets::IconName::Play))
+                                    .tooltip("Play it")
+                                    .on_click(|_, _, cx| crate::sound::play_chime(cx)),
+                            )
+                            .into_any_element()
+                        },
+                        cx,
+                    ))
+                    .child(self.row(
                         "Stop idle sessions after (minutes)",
                         Some("Only hidden, idle sessions. 0 turns it off."),
                         self.text(Field::IdleMinutes),

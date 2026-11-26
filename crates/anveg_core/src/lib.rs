@@ -3,6 +3,7 @@
 //! Nothing in this crate depends on GPUI. Everything here is unit-tested.
 
 pub mod atomic;
+pub mod chime;
 pub mod claude_env;
 pub mod config;
 pub mod files;

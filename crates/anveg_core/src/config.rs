@@ -73,6 +73,20 @@ pub struct Settings {
     pub session_status_line: bool,
     /// Session toolbar: the user's own buttons.
     pub session_buttons: Vec<SessionButton>,
+    /// A chime when Claude finishes a turn.
+    pub finish_sound: FinishSound,
+}
+
+/// When to play the chime as Claude finishes a turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishSound {
+    Off,
+    /// Only when that session is not in front of you (its window is not
+    /// active, or it is not shown in a pane).
+    WhenNotLooking,
+    #[default]
+    Always,
 }
 
 /// A button on the session toolbar that types text into Claude Code's
@@ -140,6 +154,7 @@ impl Default for Settings {
             pull_mode: PullMode::default(),
             session_status_line: true,
             session_buttons: Vec::new(),
+            finish_sound: FinishSound::default(),
         }
     }
 }
