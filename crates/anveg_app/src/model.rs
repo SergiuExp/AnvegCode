@@ -619,6 +619,8 @@ impl AppModel {
         self.windows.push(window);
         self.schedule_save(cx);
         cx.emit(ModelEvent::WindowsChanged);
+        // The Window and Dock menus list the open projects.
+        cx.defer(|cx| crate::menus::install(cx));
     }
 
     /// A project window closed (by the user, not by quitting).
@@ -629,6 +631,7 @@ impl AppModel {
         self.windows.retain(|w| w.project_id != project_id);
         self.save_state_now(cx);
         cx.emit(ModelEvent::WindowsChanged);
+        cx.defer(|cx| crate::menus::install(cx));
         if self.windows.is_empty() {
             cx.defer(crate::welcome::open);
         }

@@ -34,6 +34,16 @@ pub fn set_badge_count(count: usize) {
     });
 }
 
+/// Keep project windows out of macOS's own window list (the Window menu's
+/// and the Dock menu's): the app lists them itself (`menus`), by project,
+/// from its own record of open windows. macOS's list kept stale or
+/// duplicate names: the app rebuilds its menu bar (and so the window list's
+/// menu) whenever projects change, and AppKit's bookkeeping went wrong,
+/// showing one project's name twice. Safe to call any time.
+pub fn keep_project_windows_out_of_window_list() {
+    imp::keep_out_of_window_list(crate::windows::TABBING_ID);
+}
+
 /// System Settings ▸ Desktop & Dock ▸ "Prefer tabs when opening documents".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -279,6 +289,42 @@ mod imp {
         tracing::debug!(hidden, "full-screen title bar");
     }
 
+    pub fn keep_out_of_window_list(project_tabbing_id: &str) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        // SAFETY: plain AppKit messages on the main thread, each result
+        // checked before use.
+        unsafe {
+            let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+            let Some(app) = app.as_ref() else {
+                return;
+            };
+            let windows: *mut AnyObject = msg_send![app, windows];
+            let Some(windows) = windows.as_ref() else {
+                return;
+            };
+            let count: usize = msg_send![windows, count];
+            for i in 0..count {
+                let window: *mut AnyObject = msg_send![windows, objectAtIndex: i];
+                let Some(window) = window.as_ref() else {
+                    continue;
+                };
+                let is_window: bool = msg_send![window, isKindOfClass: objc2::class!(NSWindow)];
+                if !is_window {
+                    continue;
+                }
+                let tabbing: Option<Retained<NSString>> = msg_send![window, tabbingIdentifier];
+                if tabbing.map(|t| t.to_string()).as_deref() != Some(project_tabbing_id) {
+                    continue;
+                }
+                let () = msg_send![window, setExcludedFromWindowsMenu: true];
+                // Already listed (setting the title adds it): take it out.
+                let () = msg_send![app, removeWindowsItem: window];
+            }
+        }
+    }
+
     pub fn set_badge(label: Option<String>) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -297,6 +343,8 @@ mod imp {
     pub fn init(_tx: UnboundedSender<String>) {}
 
     pub fn hide_title_bar_in_full_screen(_project_tabbing_id: &'static str) {}
+
+    pub fn keep_out_of_window_list(_project_tabbing_id: &str) {}
 
     /// No native window tabs on other platforms.
     pub fn tabbing_mode() -> super::TabbingMode {

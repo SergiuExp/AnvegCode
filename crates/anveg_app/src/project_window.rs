@@ -489,6 +489,9 @@ impl ProjectWindow {
             title.push_str(" (Dev)");
         }
         window.set_window_title(&title);
+        // Setting a title puts the window back in macOS's own window list
+        // (`changeWindowsItem`); the app lists project windows itself.
+        crate::platform::keep_project_windows_out_of_window_list();
     }
 
     fn on_model_event(

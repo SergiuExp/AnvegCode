@@ -1061,3 +1061,30 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] Open a PNG, JPEG, GIF (animated), SVG, WebP and ICO from the Files tab: shown, with the right size in the info bar. Fit, 100%, −, + and Light/Dark work, and a big image scrolls with a trackpad in both directions.
 - [ ] SVG ▸ Source: edit, stop typing, then Image: the picture shows the change.
 - [ ] Replace an open image on disk (e.g. re-export it): the viewer updates.
+
+## Fix: the Dock menu lists each open project once (owner's report, 2026-11-26)
+
+**Problem.** Right-clicking the Dock icon showed one open project's name twice instead of every open project, and clicking an entry could bring up a different project.
+
+**Cause.** That list is macOS's own window list, which AppKit keeps through its Window menu. The app rebuilds its whole menu bar whenever projects change (including every time a project opens, for Open Recent), and each rebuild hands macOS a new window-list menu (`setWindowsMenu`). GPUI also re-registers every window with `changeWindowsItem` each time a title is set. AppKit's bookkeeping then went wrong. Other apps that rebuild their menu bar have hit the same symptom.
+
+**Fix.** The app no longer relies on that list:
+- **Out of the automatic list:** project windows are left out of macOS's window list (`excludedFromWindowsMenu`, plus `removeWindowsItem` after each title change and each menu rebuild). Other windows (Welcome, Settings, Open from GitHub) stay in it.
+- **Dock menu:** the app sets its own Dock menu: one item per open project window, in window order, each bringing up that window, then Open Project… and Open from GitHub….
+- **Window menu:** it lists the same projects under Minimize and Zoom.
+- **Same-name projects:** two open projects with the same name are told apart by folder ("app — ~/work/one/app").
+- **Always current:** both menus are rebuilt when a window opens or closes and when projects change, from the app's own record of open windows, so they can't drift. GPUI's action table only grows, so Dock items rebuilt after the menu bar keep pointing at the right actions.
+
+**Tests:** labels for open projects, including two with the same name.
+
+**Verified here:**
+- The macOS build type-checks, including the new AppKit calls (`scripts/check-macos.sh`).
+- Under Xvfb, two project windows opened, and closing one rebuilt the menus without errors.
+- The Dock itself can only be checked on a Mac.
+
+**Manual checks (Mac)**
+- [ ] Open three projects. Right-click the Dock icon: each project once, by name, above Open Project….
+- [ ] Click each Dock entry: that project's window comes forward (also in full screen, with the windows as tabs).
+- [ ] Close one project, right-click the Dock again: it's gone from the list. Open it again: it's back.
+- [ ] Window menu: the same projects under Minimize and Zoom, and choosing one brings it forward.
+- [ ] Two projects with the same folder name: shown with their folders.
