@@ -67,7 +67,43 @@ fn located<S>() -> fmt::Layer<S> {
 }
 
 fn warn_or_worse() -> FilterFn {
-    filter_fn(|meta| *meta.level() <= Level::WARN)
+    filter_fn(|meta| {
+        *meta.level() <= Level::WARN && !is_closed_window_noise(meta.file(), meta.line())
+    })
+}
+
+/// GPUI's window-geometry callbacks (visual viewport, insets, resize, move)
+/// in `gpui-pre` 0.3.10, which is pinned exactly. When macOS closes a window
+/// (the red button, ⌘W, the Dock menu's Close), GPUI forgets the window
+/// first and then lets AppKit finish closing it; AppKit resizes it on the
+/// way, and GPUI logs "window not found" for that resize. The window is
+/// gone, so nothing is lost: these lines are dropped. After a GPUI update the
+/// lines move and this simply stops matching.
+const GPUI_WINDOW_RS: &str = "gpui-pre-0.3.10/src/window.rs";
+const GPUI_GEOMETRY_CALLBACK_LINES: &[u32] = &[1956, 1964, 1972, 1980];
+
+fn is_closed_window_noise(file: Option<&str>, line: Option<u32>) -> bool {
+    file.is_some_and(|f| f.replace('\\', "/").ends_with(GPUI_WINDOW_RS))
+        && line.is_some_and(|l| GPUI_GEOMETRY_CALLBACK_LINES.contains(&l))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_closed_window_noise;
+
+    #[test]
+    fn only_gpui_window_geometry_errors_are_dropped() {
+        let gpui = "/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-0.3.10/src/window.rs";
+        assert!(is_closed_window_noise(Some(gpui), Some(1972)));
+        assert!(is_closed_window_noise(Some(gpui), Some(1980)));
+        // Other GPUI errors stay.
+        assert!(!is_closed_window_noise(Some(gpui), Some(2568)));
+        // Another GPUI version, or our own files, stay.
+        let newer = gpui.replace("0.3.10", "0.3.11");
+        assert!(!is_closed_window_noise(Some(&newer), Some(1972)));
+        assert!(!is_closed_window_noise(Some("crates/anveg_app/src/window.rs"), Some(1972)));
+        assert!(!is_closed_window_noise(None, Some(1972)));
+    }
 }
 
 fn below_warn() -> FilterFn {
