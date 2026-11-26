@@ -40,6 +40,8 @@ cargo build --release
 ./target/release/anveg-code
 ```
 
+For development, `scripts/run-dev.sh` builds the debug app and the helper and runs it, with its own settings (see [Files](#files)).
+
 ### The app bundle
 
 ```bash
