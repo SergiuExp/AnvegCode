@@ -13,7 +13,7 @@ use uuid::Uuid;
 pub fn init(cx: &mut App) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
     imp::init(tx);
-    imp::hide_title_bar_in_full_screen();
+    imp::hide_title_bar_in_full_screen(crate::windows::TABBING_ID);
     cx.spawn(async move |cx| {
         while let Some(identifier) = rx.next().await {
             let Some((project, session)) = parse_identifier(&identifier) else {
@@ -215,8 +215,11 @@ mod imp {
     /// bar that covered its top rows, so in full screen the title bar is
     /// hidden: project windows show their own window tabs and an Exit Full
     /// Screen button instead (`window_tabs`). It comes back as the window
-    /// starts to leave full screen.
-    pub fn hide_title_bar_in_full_screen() {
+    /// starts to leave full screen. Only project windows (tabbing
+    /// identifier `project_tabbing_id`): other windows, such as the welcome
+    /// window, have no such row and keep macOS's bar, so they can still
+    /// leave full screen.
+    pub fn hide_title_bar_in_full_screen(project_tabbing_id: &'static str) {
         let center = NSNotificationCenter::defaultCenter();
         let queue = NSOperationQueue::mainQueue();
         for (name, hidden) in [
@@ -226,7 +229,7 @@ mod imp {
             let block = block2::RcBlock::new(move |n: NonNull<NSNotification>| {
                 // SAFETY: AppKit passes a live notification.
                 let n = unsafe { n.as_ref() };
-                set_title_bar_hidden(n, hidden);
+                set_title_bar_hidden(n, hidden, project_tabbing_id);
             });
             // SAFETY: the block only touches AppKit on the main queue.
             let token = unsafe {
@@ -244,7 +247,7 @@ mod imp {
 
     /// Hide or show the title bar of the notification's window: the view
     /// that holds the window buttons and the tab bar.
-    fn set_title_bar_hidden(n: &NSNotification, hidden: bool) {
+    fn set_title_bar_hidden(n: &NSNotification, hidden: bool, project_tabbing_id: &str) {
         let Some(window) = n.object() else {
             return;
         };
@@ -252,6 +255,10 @@ mod imp {
         unsafe {
             let is_window: bool = msg_send![&*window, isKindOfClass: objc2::class!(NSWindow)];
             if !is_window {
+                return;
+            }
+            let tabbing: Option<Retained<NSString>> = msg_send![&*window, tabbingIdentifier];
+            if tabbing.map(|t| t.to_string()).as_deref() != Some(project_tabbing_id) {
                 return;
             }
             // NSWindowCloseButton = 0.
@@ -289,7 +296,7 @@ mod imp {
 
     pub fn init(_tx: UnboundedSender<String>) {}
 
-    pub fn hide_title_bar_in_full_screen() {}
+    pub fn hide_title_bar_in_full_screen(_project_tabbing_id: &'static str) {}
 
     /// No native window tabs on other platforms.
     pub fn tabbing_mode() -> super::TabbingMode {

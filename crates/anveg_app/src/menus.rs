@@ -36,7 +36,7 @@ pub fn install(cx: &App) {
             MenuItem::action("New Session in Worktree…", NewSessionInWorktree),
             MenuItem::action("New Terminal", NewTerminal),
             MenuItem::separator(),
-            MenuItem::action("Open Folder…", OpenFolder),
+            MenuItem::action("Open Project…", OpenFolder),
             MenuItem::action("Go to File…", QuickOpen),
             MenuItem::submenu(Menu::new("Open Recent").items(recent_items)),
             MenuItem::separator(),

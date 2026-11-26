@@ -1,10 +1,13 @@
-//! The welcome window: recent projects and Open Folder… (build plan, 6.1).
-//! Shown when no project window is open.
+//! The welcome window: recent projects and Open Project… (build plan, 6.1).
+//! Shown when no project window is open. Closing it (red button or ⌘W)
+//! quits the app when no project window is open, as IntelliJ IDEA's
+//! welcome screen does; otherwise the app would stay running with no
+//! window, which looked like the window had only been minimized.
 
 use gpui_cn::TitleBar;
 use gpui_cn::prelude::*;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, WindowBounds, WindowOptions, div, px, size,
 };
@@ -16,6 +19,8 @@ use crate::ui::Colors;
 
 pub struct Welcome {
     model: Entity<AppModel>,
+    /// Focused when the window opens, so ⌘W reaches it.
+    focus: FocusHandle,
     _subscription: Subscription,
 }
 
@@ -40,11 +45,19 @@ pub fn open(cx: &mut App) {
     match gpui_kit::open_window(options, cx, |window, cx| {
         let sandbox = crate::model::model(cx).read(cx).paths.is_sandbox();
         window.set_window_title(if sandbox { "Anveg Code (Dev)" } else { "Anveg Code" });
+        // The red button.
+        window.on_window_should_close(cx, |_, cx| {
+            closed_by_user(cx);
+            true
+        });
         cx.new(|cx| {
             let model = crate::model::model(cx);
             let sub = cx.observe(&model, |_, _, cx| cx.notify());
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
             Welcome {
                 model,
+                focus,
                 _subscription: sub,
             }
         })
@@ -54,11 +67,30 @@ pub fn open(cx: &mut App) {
     }
 }
 
-/// Close the welcome window, if open.
+/// The user closed the welcome window: quit if no project is open.
+fn closed_by_user(cx: &mut App) {
+    // After the window is gone (and outside its own update).
+    cx.defer(|cx| {
+        let model = model(cx);
+        model.update(cx, |m, _| m.welcome = None);
+        if model.read(cx).windows.is_empty() {
+            tracing::info!("welcome window closed with no project open: quitting");
+            crate::request_quit(cx);
+        }
+    });
+}
+
+/// Close the welcome window, if open (a project window opened).
 pub fn close(cx: &mut App) {
     let model = model(cx);
     if let Some(handle) = model.update(cx, |m, _| m.welcome.take()) {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        // Deferred: when the project was opened from the welcome window
+        // itself, that window is busy handling the click and could not be
+        // closed now. Removing it this way does not quit (only the user
+        // closing it does).
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        });
     }
 }
 
@@ -95,12 +127,16 @@ impl Render for Welcome {
 
         div()
             .id("welcome")
+            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
             .bg(c.background)
             .text_color(c.foreground)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &CloseWindow, window, cx| {
+                window.remove_window();
+                closed_by_user(cx);
+            })
             .child(TitleBar::new())
             .child(
                 div()
@@ -128,7 +164,7 @@ impl Render for Welcome {
                         div().flex().child(
                             Button::new("welcome-open")
                                 .primary()
-                                .label("Open Folder…")
+                                .label("Open Project…")
                                 .tooltip("⌘O")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(OpenFolder), cx)

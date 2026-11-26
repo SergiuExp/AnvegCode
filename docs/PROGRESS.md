@@ -800,3 +800,24 @@ The owner reported two full-screen problems on their MacBook: (1) the other proj
 - [ ] × on the other window's tab closes it (asking first if it has running sessions).
 
 **Follow-up (2026-11-26):** the owner confirmed it works on the Mac and asked for the window buttons in the row. The row now starts with **close, minimize and exit full screen drawn like macOS's** (red, grey, green; 12 px, glyphs on hover). Minimize is grey and does nothing, as macOS shows it in full screen. The separate Exit Full Screen button at the right end is gone (green does it). Red, like ⌘W, asks about running sessions and unsaved files first. Fixed on the way: closing through the action (red, or × on the current window's tab) did nothing when no element had focus; the buttons now call the close check directly, for other windows' tabs too. Verified under Xvfb + Openbox: the buttons in dark theme, glyphs on hover, green leaves full screen, red closes the window, × closes the other window.
+
+---
+
+## Change: welcome window closes properly; "Open Project…" (2026-11-26)
+
+The owner reported that the welcome window's red button only seemed to minimize it, that it could not leave full screen, and asked to rename Open Folder to Open Project.
+
+**Done**
+- **Closing the welcome window quits** when no project window is open (red button or ⌘W), as IntelliJ IDEA's welcome screen does. Before, the window closed but the app stayed running with no window, which looked like a minimize. Quitting goes through the normal quit (nothing to ask with no project open).
+- **⌘W on the welcome window** did nothing before (nothing in it had keyboard focus); the window now takes focus when it opens.
+- **Opening a project from the welcome window now closes it.** Clicking a recent project (or Open Project…) left the welcome window open: it was asked to close while still handling the click, which silently failed. The close is now deferred, and it does not quit.
+- **Full screen:** the title bar is only hidden for project windows (identified by their macOS tabbing identifier). The welcome window has no window-tabs row, so it keeps macOS's slide-down bar in full screen and can leave it with the green button as usual.
+- **Renamed** "Open Folder…" to **"Open Project…"** in the File menu and on the welcome window (⌘O; it still picks a folder).
+
+**Verified on Linux** (Xvfb + Openbox): closing the welcome window with the window manager's close button and with ⌘W quits; opening a recent project closes the welcome window and keeps the app running; the button reads Open Project….
+
+**Manual checks (Mac)**
+- [ ] With no project open, the welcome window's red button quits the app (no Dock dot left).
+- [ ] Welcome window in full screen: moving to the top shows the window buttons; green leaves full screen.
+- [ ] Project windows in full screen still have no slide-down bar.
+- [ ] File ▸ Open Project… (⌘O) opens the folder picker.
