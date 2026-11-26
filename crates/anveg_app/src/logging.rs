@@ -87,6 +87,11 @@ fn is_closed_window_noise(file: Option<&str>, line: Option<u32>) -> bool {
         && line.is_some_and(|l| GPUI_GEOMETRY_CALLBACK_LINES.contains(&l))
 }
 
+
+fn below_warn() -> FilterFn {
+    filter_fn(|meta| *meta.level() > Level::WARN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_closed_window_noise;
@@ -104,8 +109,4 @@ mod tests {
         assert!(!is_closed_window_noise(Some("crates/anveg_app/src/window.rs"), Some(1972)));
         assert!(!is_closed_window_noise(None, Some(1972)));
     }
-}
-
-fn below_warn() -> FilterFn {
-    filter_fn(|meta| *meta.level() > Level::WARN)
 }
