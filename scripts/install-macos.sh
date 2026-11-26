@@ -83,3 +83,5 @@ if [ "$OPEN" = 1 ]; then
 else
   echo "Open it from Launchpad or Spotlight, or:  open \"$TARGET\""
 fi
+
+echo "Finished $(date '+%Y-%m-%d %H:%M:%S')"
