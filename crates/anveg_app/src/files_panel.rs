@@ -20,11 +20,11 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render,
     ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Task, UniformListScrollHandle,
-    Window, div, hsla, px, uniform_list, FontWeight,
+    Window, div, px, uniform_list, FontWeight,
 };
 use gpui_kit::assets::IconName;
 
-use crate::file_icons::{FOLDER, FOLDER_OPEN, file_icon};
+use crate::file_icons::{FOLDER, FOLDER_OPEN, file_icon, folder_color};
 
 use crate::git_panel::{GitStore, IGNORED_COLOR, change_color};
 use crate::model::model;
@@ -797,11 +797,7 @@ impl FilesPanel {
     fn render_rows(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let c = Colors::of(cx);
         let dark = cx.theme().is_dark();
-        let folder_color = if dark {
-            hsla(0.58, 0.45, 0.66, 1.0)
-        } else {
-            hsla(0.58, 0.55, 0.52, 1.0)
-        };
+        let folder_color = folder_color(dark);
         let guide = c.foreground.opacity(if dark { 0.10 } else { 0.12 });
         let focused = self.focus.is_focused(window);
         let store = self.store.read(cx);

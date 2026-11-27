@@ -6,6 +6,16 @@
 //! icons are Lucide's (`app_assets` bundles them).
 
 use gpui_kit::assets::IconName;
+use gpui_kit::{Hsla, hsla};
+
+/// The folder icons' colour: a soft blue, a little darker on light themes.
+pub fn folder_color(dark: bool) -> Hsla {
+    if dark {
+        hsla(0.58, 0.45, 0.66, 1.0)
+    } else {
+        hsla(0.58, 0.55, 0.52, 1.0)
+    }
+}
 
 /// A closed folder, filled.
 pub const FOLDER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#000" d="M2.5 6.5A2.5 2.5 0 0 1 5 4h3.7a2 2 0 0 1 1.45.62L12 6.5h7a2.5 2.5 0 0 1 2.5 2.5v8.5A2.5 2.5 0 0 1 19 20H5a2.5 2.5 0 0 1-2.5-2.5z"/></svg>"##;

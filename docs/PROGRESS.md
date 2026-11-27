@@ -1440,3 +1440,30 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] The tree in both themes on a Retina screen: icons crisp, folder blue readable, indent guides faint but visible.
 - [ ] The arrow keys and ↩ in the tree; typing in the editor afterwards doesn't move the tree.
 - [ ] New File and New Folder from the toolbar with a file selected create it in that file's folder.
+
+**Follow-up (2026-11-27): Git tab: changed files as a tree, a checkbox per folder.** The owner asked for the Files tab's improvements in the commit view too, with a tree so one checkbox can take a whole folder in or out of a commit.
+- **Tree view** (the default) in each section (Staged, Changes, Untracked, Conflicts):
+  - folders first, then files, sorted by name;
+  - a chain of folders with nothing else in them is one row (`deep/a/b`), so deep paths don't waste rows;
+  - the same look as the Files tab: chevron, filled folder icon, file-type icons, indent guides.
+  - `anveg_core::path_tree` builds the rows (pure, with tests).
+- **A folder's checkbox** checks or unchecks every file below it in that section. When only some are checked, the box shows a dash; clicking it puts them all in. Section headers work the same way now (they used to show empty when only some were checked).
+- **A folder row** says how many files it holds. Clicking it opens or closes it. Its + stages everything in it (Changes, Untracked) and its − unstages it (Staged). There's no Discard for a whole folder, on purpose.
+- **Files** show their change letter on the right, with Discard and Stage (or Unstage), as before. Clicking one opens its diff.
+- **Toolbar** above the sections: Open All Folders, Close All Folders (Tree only), and the List / Tree switch.
+  - The choice is saved (`Settings.changes_tree`, true by default).
+  - List view is the old flat list, now with file-type icons, the change letter on the right, and the folder after the name.
+- Closed folders are remembered while the app runs, per section.
+
+**Verified (sandbox):** dark and light themes.
+- Staged `src/lib.rs`, changed `src/main.rs` and `README.md`, and new files in `deep/a/b`, `docs/guides` and `src/ui`: shown as a tree, with `deep/a/b` on one row.
+- Unchecking the `src/ui` folder unchecked its two files; the Untracked header showed a dash; "Commit 11 Files" became "Commit 9 Files".
+- The commit held exactly those 9 files, and `src/ui/` stayed untracked and unchecked.
+- In `src` with `net` and `ui` below it: unchecking `ui` gave `src` a dash. Clicking the dash checked all four.
+- List / Tree switch, saved across a restart; Close All Folders.
+- Core tests `folders_first_chains_folded` and `collapsed_folders_hide_their_rows`.
+
+**Manual checks (Mac)**
+- [ ] Tree view in both themes: checkboxes, the dash box and the indent guides line up.
+- [ ] Uncheck a folder and commit: none of its files are in the commit.
+- [ ] Stage Folder (+) on a folder in Untracked stages only that folder's files.

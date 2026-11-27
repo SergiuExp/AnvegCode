@@ -77,6 +77,9 @@ pub struct Settings {
     pub finish_sound: FinishSound,
     /// Diffs side by side (before | after) rather than in one column.
     pub diff_split: bool,
+    /// The Git tab lists changed files in a folder tree (with a checkbox
+    /// per folder) rather than as a flat list.
+    pub changes_tree: bool,
     /// The GitHub OAuth App's client ID, for "Sign in with GitHub" (the
     /// device flow). Not a secret. Without one, sign in with a token.
     pub github_client_id: Option<String>,
@@ -175,6 +178,7 @@ impl Default for Settings {
             session_buttons: Vec::new(),
             finish_sound: FinishSound::default(),
             diff_split: true,
+            changes_tree: true,
             github_client_id: None,
         }
     }

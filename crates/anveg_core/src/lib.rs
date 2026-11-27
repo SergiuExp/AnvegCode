@@ -19,6 +19,7 @@ pub mod github_publish;
 pub mod images;
 pub mod launcher;
 pub mod notes;
+pub mod path_tree;
 pub mod paths;
 pub mod procinfo;
 pub mod process;

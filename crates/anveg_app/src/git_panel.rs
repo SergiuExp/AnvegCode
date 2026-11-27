@@ -28,12 +28,15 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
 };
+use gpui_kit::assets::IconName;
 use uuid::Uuid;
 
 use crate::actions::{Commit as CommitAction, CommitAndPush, GIT_PANEL_CONTEXT};
 use crate::model::model;
+use crate::file_icons::{FOLDER, FOLDER_OPEN, file_icon, folder_color};
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
+use anveg_core::path_tree::{self, TreeItem};
 
 // ---------------------------------------------------------------------
 // The store
@@ -410,6 +413,8 @@ pub struct GitPanel {
     /// Rows left out of the next commit (unchecked), by [`row_key`]. Every
     /// row is checked unless listed here.
     excluded: std::collections::HashSet<String>,
+    /// Folders closed in the Tree view, by [`row_key`] of the folder's path.
+    collapsed: std::collections::HashSet<String>,
     amend: bool,
     busy: Option<String>,
     network: Option<NetworkJob>,
@@ -471,6 +476,7 @@ impl GitPanel {
             filling: false,
             recent_menu,
             excluded: std::collections::HashSet::new(),
+            collapsed: std::collections::HashSet::new(),
             amend: false,
             busy: None,
             network: None,
@@ -1634,7 +1640,11 @@ impl GitPanel {
                 .into_any_element();
         };
         let commit_box = self.render_commit_box(&status, cx);
+        let tree = model(cx).read(cx).settings.changes_tree;
         let mut list = div().flex().flex_col();
+        if !status.is_clean() {
+            list = list.child(self.render_changes_toolbar(tree, cx));
+        }
         for (section, label) in [
             (Section::Conflicts, "Conflicts"),
             (Section::Staged, "Staged"),
@@ -1675,17 +1685,9 @@ impl GitPanel {
             };
             // Check or uncheck the whole section (not conflicts: those are
             // resolved first).
-            let header_check = (section != Section::Conflicts && !check_paths.is_empty()).then(|| {
-                let all = check_paths.iter().all(|p| self.is_checked(section, p));
-                let weak = cx.entity().downgrade();
-                let paths = check_paths.clone();
-                Checkbox::new(SharedString::from(format!("check-all-{label}")))
-                    .checked(all)
-                    .tooltip(if all { "Leave all out of the commit" } else { "Include all in the commit" })
-                    .on_click(move |on, _, cx| {
-                        let _ = weak.update(cx, |this, cx| this.set_checked(section, &paths, *on, cx));
-                    })
-            });
+            let header_check = (section != Section::Conflicts)
+                .then(|| self.check_control(SharedString::from(format!("check-all-{label}")), section, check_paths, cx))
+                .flatten();
             list = list.child(
                 div()
                     .flex()
@@ -1700,8 +1702,27 @@ impl GitPanel {
                     .children(header_button),
             );
             let total = entries.len();
-            for (i, entry) in entries.into_iter().take(500).enumerate() {
-                list = list.child(self.render_entry(section, i, entry, cx));
+            let shown: Vec<StatusEntry> = entries.into_iter().take(500).collect();
+            if tree {
+                for row in self.tree_rows(section, &shown) {
+                    match row {
+                        TreeItem::Dir { path, label, depth, files } => {
+                            let below: Vec<&StatusEntry> = files.iter().filter_map(|&ix| shown.get(ix)).collect();
+                            let el = self.render_dir(section, path, label, depth, &below, cx);
+                            list = list.child(el);
+                        }
+                        TreeItem::File { index, depth, .. } => {
+                            if let Some(entry) = shown.get(index) {
+                                let el = self.render_entry(section, index, entry.clone(), Some(depth), cx);
+                                list = list.child(el);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (i, entry) in shown.into_iter().enumerate() {
+                    list = list.child(self.render_entry(section, i, entry, None, cx));
+                }
             }
             if total > 500 {
                 list = list.child(
@@ -1767,7 +1788,7 @@ impl GitPanel {
 
     /// An untracked folder with its own `.git`: git sees one entry, never
     /// its files, so it gets Include… and Open instead of Stage.
-    fn render_inner_repo(&mut self, i: usize, entry: StatusEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_inner_repo(&mut self, i: usize, entry: StatusEntry, indent: f32, cx: &mut Context<Self>) -> AnyElement {
         let c = Colors::of(cx);
         let rel = entry.path.trim_end_matches('/').to_owned();
         let abs = self.repo_root(cx).map(|r| r.join(&rel));
@@ -1779,7 +1800,8 @@ impl GitPanel {
         div()
             .id(id.clone())
             .h(px(26.))
-            .px_2()
+            .pl(px(indent))
+            .pr_2()
             .flex()
             .items_center()
             .gap_1()
@@ -1925,17 +1947,268 @@ impl GitPanel {
         }));
     }
 
+    // -----------------------------------------------------------------
+    // Changed files: list or tree
+    // -----------------------------------------------------------------
+
+    /// The Tree view's rows for one section's entries.
+    fn tree_rows(&self, section: Section, entries: &[StatusEntry]) -> Vec<TreeItem> {
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        path_tree::flatten(&paths, &|dir| self.collapsed.contains(&row_key(section, dir)))
+    }
+
+    fn toggle_folder(&mut self, section: Section, dir: &str, cx: &mut Context<Self>) {
+        let key = row_key(section, dir);
+        if !self.collapsed.remove(&key) {
+            self.collapsed.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Close every folder (`false`) or open them all (`true`).
+    fn expand_all(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.collapsed.clear();
+        if !open && let Some(status) = self.repo_state(cx).and_then(|r| r.status) {
+            for section in [Section::Conflicts, Section::Staged, Section::Changes, Section::Untracked] {
+                let paths: Vec<&str> = status.section(section).map(|e| e.path.as_str()).collect();
+                for row in path_tree::flatten(&paths, &|_| false) {
+                    if let TreeItem::Dir { path, .. } = row {
+                        self.collapsed.insert(row_key(section, &path));
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
+        model(cx).update(cx, |m, cx| m.update_settings(cx, |s| s.changes_tree = tree));
+        cx.notify();
+    }
+
+    /// List / Tree, and in Tree, open or close every folder.
+    fn render_changes_toolbar(&mut self, tree: bool, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_2()
+            .pt_1()
+            .child(div().flex_1().text_xs().text_color(c.muted_foreground).child("Changed files"))
+            .when(tree, |el| {
+                el.child(
+                    Button::new("changes-expand")
+                        .ghost()
+                        .size(ButtonSize::Xs)
+                        .icon(Icon::from(IconName::ChevronsUpDown))
+                        .tooltip("Open All Folders")
+                        .on_click(cx.listener(|this, _, _, cx| this.expand_all(true, cx))),
+                )
+                .child(
+                    Button::new("changes-collapse")
+                        .ghost()
+                        .size(ButtonSize::Xs)
+                        .icon(Icon::from(IconName::ChevronsDownUp))
+                        .tooltip("Close All Folders")
+                        .on_click(cx.listener(|this, _, _, cx| this.expand_all(false, cx))),
+                )
+                .child(div().w(px(1.)).h(px(14.)).mx_1().bg(c.border))
+            })
+            .child(
+                Button::new("changes-as-list")
+                    .ghost()
+                    .size(ButtonSize::Xs)
+                    .icon(Icon::from(IconName::List))
+                    .toggled(!tree)
+                    .selected(!tree)
+                    .tooltip("Show as a List")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tree(false, cx))),
+            )
+            .child(
+                Button::new("changes-as-tree")
+                    .ghost()
+                    .size(ButtonSize::Xs)
+                    .icon(Icon::from(IconName::FolderTree))
+                    .toggled(tree)
+                    .selected(tree)
+                    .tooltip("Show as a Tree (a checkbox per folder)")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tree(true, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The checkbox for several rows (a section, a folder): checked when all
+    /// are in the commit, empty when none are, and a dash when only some
+    /// are (clicking it puts them all in). `None` with no rows.
+    fn check_control(
+        &self,
+        id: SharedString,
+        section: Section,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if paths.is_empty() {
+            return None;
+        }
+        let checked = paths.iter().filter(|p| self.is_checked(section, p)).count();
+        let weak = cx.entity().downgrade();
+        if checked == 0 || checked == paths.len() {
+            let all = checked == paths.len();
+            return Some(
+                Checkbox::new(id)
+                    .checked(all)
+                    .tooltip(if all { "Leave all out of the commit" } else { "Include all in the commit" })
+                    .on_click(move |on, _, cx| {
+                        // Not also the row's click (which opens or closes it).
+                        cx.stop_propagation();
+                        let _ = weak.update(cx, |this, cx| this.set_checked(section, &paths, *on, cx));
+                    })
+                    .into_any_element(),
+            );
+        }
+        let theme = cx.theme();
+        let (bg, fg) = (theme.primary(), theme.primary_foreground());
+        let tip = format!("{checked} of {} in the commit. Click to include all", paths.len());
+        Some(
+            div()
+                .id(id)
+                .size(px(16.))
+                .flex_none()
+                .rounded(px(4.))
+                .bg(bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(Icon::from(IconName::Minus).size(px(12.)).text_color(fg))
+                .tooltip(move |_, cx| crate::ui::LinesTooltip::build(vec![tip.clone()], cx))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let _ = weak.update(cx, |this, cx| this.set_checked(section, &paths, true, cx));
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// A folder in the Tree view: open or close it, check or uncheck
+    /// everything in it, stage or unstage it all.
+    fn render_dir(
+        &mut self,
+        section: Section,
+        path: String,
+        label: String,
+        depth: usize,
+        below: &[&StatusEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = Colors::of(cx);
+        let dark = cx.theme().is_dark();
+        let open = !self.collapsed.contains(&row_key(section, &path));
+        let id = SharedString::from(format!("d-{section:?}-{path}"));
+        // Inner repositories are not staged or committed with the rest.
+        let paths: Vec<String> = below
+            .iter()
+            .filter(|e| !e.is_inner_repo())
+            .map(|e| e.path.clone())
+            .collect();
+        let check = (section != Section::Conflicts)
+            .then(|| self.check_control(SharedString::from(format!("{id}-c")), section, paths.clone(), cx))
+            .flatten();
+        let button = match section {
+            Section::Staged if !paths.is_empty() => {
+                let p = paths.clone();
+                Some(
+                    Button::new(SharedString::from(format!("{id}-u")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .icon(Icon::from(IconName::Minus))
+                        .tooltip("Unstage Folder")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.unstage(p.clone(), window, cx)
+                        })),
+                )
+            }
+            Section::Changes | Section::Untracked if !paths.is_empty() => {
+                let p = paths.clone();
+                Some(
+                    Button::new(SharedString::from(format!("{id}-s")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .icon(Icon::from(IconName::Plus))
+                        .tooltip("Stage Folder")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.stage(p.clone(), window, cx)
+                        })),
+                )
+            }
+            _ => None,
+        };
+        let count = below.len();
+        let toggle = path.clone();
+        div()
+            .id(id)
+            .relative()
+            .h(px(26.))
+            .pl(px(tree_indent(Some(depth))))
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|el| el.bg(c.accent.opacity(0.5)))
+            .children(tree_guides(Some(depth), c.foreground.opacity(if dark { 0.10 } else { 0.12 })))
+            .child(
+                div().w(px(TREE_CHEVRON)).flex_none().flex().justify_center().child(
+                    Icon::from(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                        .size_3()
+                        .text_color(c.muted_foreground),
+                ),
+            )
+            .children(check)
+            .child(
+                Icon::from(if open { FOLDER_OPEN } else { FOLDER })
+                    .size(px(15.))
+                    .text_color(folder_color(dark)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(if count == 1 { "1 file".to_owned() } else { format!("{count} files") }),
+            )
+            .children(button)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_folder(section, &toggle, cx)))
+            .into_any_element()
+    }
+
+    /// A changed file. `depth`: its level in the Tree view; `None` in the
+    /// List view (which shows its folder after its name).
     fn render_entry(
         &mut self,
         section: Section,
         i: usize,
         entry: StatusEntry,
+        depth: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if entry.is_inner_repo() {
-            return self.render_inner_repo(i, entry, cx);
+            let indent = tree_indent(depth) + if depth.is_some() { TREE_CHEVRON + 4. } else { 0. };
+            return self.render_inner_repo(i, entry, indent, cx);
         }
         let c = Colors::of(cx);
+        let dark = cx.theme().is_dark();
         let (dir, name) = match entry.path.rsplit_once('/') {
             Some((d, n)) => (d.to_owned(), n.to_owned()),
             None => (String::new(), entry.path.clone()),
@@ -1952,7 +2225,7 @@ impl GitPanel {
                     Button::new(SharedString::from(format!("{id}-u")))
                         .ghost()
                         .size(ButtonSize::Sm)
-                        .icon(Icon::from(gpui_kit::assets::IconName::Minus))
+                        .icon(Icon::from(IconName::Minus))
                         .tooltip("Unstage")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             // Not also the row's click (which opens the diff).
@@ -1969,7 +2242,7 @@ impl GitPanel {
                         Button::new(SharedString::from(format!("{id}-d")))
                             .ghost()
                             .size(ButtonSize::Sm)
-                            .icon(Icon::from(gpui_kit::assets::IconName::Undo2))
+                            .icon(Icon::from(IconName::Undo2))
                             .tooltip("Discard…")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -1981,7 +2254,7 @@ impl GitPanel {
                     Button::new(SharedString::from(format!("{id}-s")))
                         .ghost()
                         .size(ButtonSize::Sm)
-                        .icon(Icon::from(gpui_kit::assets::IconName::Plus))
+                        .icon(Icon::from(IconName::Plus))
                         .tooltip(if section == Section::Conflicts {
                             "Mark Resolved (stage)"
                         } else {
@@ -1996,13 +2269,18 @@ impl GitPanel {
         }
         div()
             .id(id)
+            .relative()
             .h(px(26.))
-            .px_2()
+            .pl(px(tree_indent(depth)))
+            .pr_2()
             .flex()
             .items_center()
             .gap_1()
             .cursor_pointer()
             .hover(|el| el.bg(c.accent.opacity(0.5)))
+            .children(tree_guides(depth, c.foreground.opacity(if dark { 0.10 } else { 0.12 })))
+            // Under its folder's chevron column.
+            .when(depth.is_some(), |el| el.child(div().w(px(TREE_CHEVRON)).flex_none()))
             .when(section != Section::Conflicts, |el| {
                 let checked = self.is_checked(section, &entry.path);
                 let weak = cx.entity().downgrade();
@@ -2018,8 +2296,8 @@ impl GitPanel {
                         }),
                 )
             })
-            .child(div().w(px(14.)).text_xs().text_color(color).child(entry.change.letter()))
-            .child(div().text_sm().text_color(color).child(name))
+            .child(Icon::from(file_icon(&name)).size(px(14.)).text_color(c.muted_foreground))
+            .child(div().min_w_0().truncate().text_sm().text_color(color).child(name))
             .child(
                 div()
                     .flex_1()
@@ -2027,7 +2305,15 @@ impl GitPanel {
                     .truncate()
                     .text_xs()
                     .text_color(c.muted_foreground)
-                    .child(dir),
+                    .when(depth.is_none(), |el| el.child(dir)),
+            )
+            .child(
+                div()
+                    .w(px(12.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(color)
+                    .child(entry.change.letter()),
             )
             .child(buttons)
             .on_click(cx.listener(move |this, _, _, cx| this.open_diff(&open, cx)))
@@ -2541,6 +2827,29 @@ impl GitPanel {
         }
         list.into_any_element()
     }
+}
+
+/// The Tree view: left padding, indent per level, the chevron column.
+const TREE_START: f32 = 8.;
+const TREE_INDENT: f32 = 14.;
+const TREE_CHEVRON: f32 = 14.;
+
+/// A row's left padding: tree rows by depth, list rows by the start.
+fn tree_indent(depth: Option<usize>) -> f32 {
+    TREE_START + depth.unwrap_or(0) as f32 * TREE_INDENT
+}
+
+/// A faint line down from each enclosing folder's chevron.
+fn tree_guides(depth: Option<usize>, color: gpui_kit::Hsla) -> impl Iterator<Item = gpui_kit::Div> {
+    (0..depth.unwrap_or(0)).map(move |level| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(TREE_START + level as f32 * TREE_INDENT + TREE_CHEVRON / 2.))
+            .w(px(1.))
+            .bg(color)
+    })
 }
 
 /// A row of the Changes view, for its checkbox.

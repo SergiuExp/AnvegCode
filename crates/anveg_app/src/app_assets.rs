@@ -29,6 +29,9 @@ gpui_kit::assets::icon_assets!(
         FilePlus,
         FolderPlus,
         ChevronsDownUp,
+        // The Git tab's List / Tree switch.
+        List,
+        FolderTree,
     ]
 );
 
