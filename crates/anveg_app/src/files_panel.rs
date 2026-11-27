@@ -23,7 +23,7 @@ use gpui_kit::{
     Window, div, px, uniform_list,
 };
 
-use crate::git_panel::{GitStore, change_color};
+use crate::git_panel::{GitStore, IGNORED_COLOR, change_color};
 use crate::model::model;
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
@@ -601,12 +601,28 @@ impl FilesPanel {
                 Box::new(move |this, cx| this.rename(p.clone(), cx)),
             ));
         }
-        if self.repo_of(&path, cx).is_some() {
+        // Only when git has something to take: something new (or ignored),
+        // or edits not staged yet. Not for files already in git, unchanged.
+        let label = if self.repo_of(&path, cx).is_none() {
+            None
+        } else if row.ignored {
+            Some("Add to Git")
+        } else {
+            use anveg_core::git::Addable;
+            match self.store.read(cx).addable(&path) {
+                Some(Addable::New) => Some("Add to Git"),
+                Some(Addable::Changes) => Some("Stage Changes"),
+                Some(Addable::Nothing) => None,
+                // Status not loaded yet: offer it (git add is harmless).
+                None => Some("Add to Git"),
+            }
+        };
+        if let Some(label) = label {
             entries.push(MenuEntry::Separator);
             let p = path.clone();
             entries.push(item(
                 "add-to-git",
-                "Add to Git",
+                label,
                 Box::new(move |this, cx| this.add_to_git(p.clone(), cx)),
             ));
         }
@@ -657,11 +673,14 @@ impl FilesPanel {
                 } else {
                     store.file_change(&row.path)
                 };
-                let dir_changed = row.is_dir && !row.root && store.dir_changed(&row.path);
-                let color = match change {
+                // A folder takes the colour of the most pressing change in
+                // it (a folder of new files is red).
+                let dir_change = (row.is_dir && !row.root)
+                    .then(|| store.dir_change(&row.path))
+                    .flatten();
+                let color = match change.or(dir_change) {
                     Some(ch) => change_color(ch, &c),
-                    None if row.ignored => c.muted_foreground.opacity(0.6),
-                    None if dir_changed => gpui_kit::hsla(0.11, 0.8, 0.5, 1.0),
+                    None if row.ignored => IGNORED_COLOR,
                     None => c.foreground,
                 };
                 let selected = self.selected.as_deref() == Some(row.path.as_path());

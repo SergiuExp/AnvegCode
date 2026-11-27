@@ -321,17 +321,29 @@ impl GitStore {
         repo.status.as_ref()?.file_change(&rel)
     }
 
-    /// Whether anything under the folder `dir` changed.
-    pub fn dir_changed(&self, dir: &Path) -> bool {
-        self.repos.iter().any(|repo| {
-            let Ok(rel) = dir.strip_prefix(&repo.root) else {
-                return false;
-            };
-            let prefix = format!("{}/", rel.to_string_lossy());
-            repo.status
-                .as_ref()
-                .is_some_and(|s| s.entries.iter().any(|e| e.path.starts_with(&prefix)))
-        })
+    /// The innermost repository `path` is in, and `path` relative to it
+    /// ("." for the root itself).
+    fn repo_and_rel(&self, path: &Path) -> Option<(&RepoState, String)> {
+        let repo = self
+            .repos
+            .iter()
+            .filter(|r| path.starts_with(&r.root))
+            .max_by_key(|r| r.root.as_os_str().len())?;
+        let rel = path.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
+        Some((repo, if rel.is_empty() { ".".into() } else { rel }))
+    }
+
+    /// The change a folder is coloured by (the most pressing under it).
+    pub fn dir_change(&self, dir: &Path) -> Option<Change> {
+        let (repo, rel) = self.repo_and_rel(dir)?;
+        repo.status.as_ref()?.folder_change(&rel)
+    }
+
+    /// What Add to Git would do for a file or folder; `None` while the
+    /// repository's status is not known yet.
+    pub fn addable(&self, path: &Path) -> Option<anveg_core::git::Addable> {
+        let (repo, rel) = self.repo_and_rel(path)?;
+        Some(repo.status.as_ref()?.addable(&rel))
     }
 }
 
@@ -637,8 +649,8 @@ impl GitPanel {
                     .gap_1()
                     .when(!folder, |el| el.cursor_pointer())
                     .hover(|el| el.bg(c.accent.opacity(0.5)))
-                    .child(div().w(px(14.)).text_xs().text_color(c.muted_foreground).child("I"))
-                    .child(div().text_sm().text_color(c.muted_foreground).child(name))
+                    .child(div().w(px(14.)).text_xs().text_color(IGNORED_COLOR).child("I"))
+                    .child(div().text_sm().text_color(IGNORED_COLOR).child(name))
                     .child(
                         div()
                             .flex_1()
@@ -2290,14 +2302,27 @@ impl GitPanel {
     }
 }
 
+/// File colours, here and in the Files tab: not in git red, added green,
+/// edited blue, renamed teal, deleted grey, conflicted purple; ignored
+/// files are orange ([`IGNORED_COLOR`]).
 pub fn change_color(change: Change, c: &Colors) -> gpui_kit::Hsla {
     match change {
-        Change::Added | Change::Untracked => gpui_kit::hsla(0.33, 0.55, 0.45, 1.0),
-        Change::Deleted | Change::Conflicted => c.destructive,
-        Change::Modified | Change::TypeChanged => gpui_kit::hsla(0.11, 0.8, 0.5, 1.0),
-        Change::Renamed | Change::Copied => gpui_kit::hsla(0.58, 0.6, 0.55, 1.0),
+        Change::Untracked => gpui_kit::hsla(0.0, 0.75, 0.6, 1.0),
+        Change::Added => gpui_kit::hsla(0.33, 0.55, 0.45, 1.0),
+        Change::Deleted => c.muted_foreground,
+        Change::Conflicted => gpui_kit::hsla(0.8, 0.6, 0.62, 1.0),
+        Change::Modified | Change::TypeChanged => gpui_kit::hsla(0.59, 0.75, 0.6, 1.0),
+        Change::Renamed | Change::Copied => gpui_kit::hsla(0.5, 0.55, 0.48, 1.0),
     }
 }
+
+/// Files and folders git ignores.
+pub const IGNORED_COLOR: gpui_kit::Hsla = gpui_kit::Hsla {
+    h: 0.075,
+    s: 0.85,
+    l: 0.55,
+    a: 1.0,
+};
 
 impl Render for GitPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

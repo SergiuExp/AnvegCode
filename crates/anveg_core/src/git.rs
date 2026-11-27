@@ -920,7 +920,54 @@ pub struct Status {
     pub entries: Vec<StatusEntry>,
 }
 
+/// What `git add` would do for a path (a file, or a folder with what is
+/// under it), for the Files tab's menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Addable {
+    /// Tracked and unchanged, or every change already staged.
+    Nothing,
+    /// Something not in git yet (a new file).
+    New,
+    /// Tracked, with changes not staged.
+    Changes,
+}
+
 impl Status {
+    /// The entries for `rel` and, for a folder, everything under it ("."
+    /// is the repository's root).
+    fn entries_under<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = &'a StatusEntry> + 'a {
+        let all = rel == "." || rel.is_empty();
+        self.entries.iter().filter(move |e| {
+            all || e.path == rel || e.path.strip_prefix(rel).is_some_and(|r| r.starts_with('/'))
+        })
+    }
+
+    /// Whether Add to Git has anything to do for `rel`. Conflicts don't
+    /// count: they are resolved in the Git tab.
+    pub fn addable(&self, rel: &str) -> Addable {
+        let mut out = Addable::Nothing;
+        for e in self.entries_under(rel) {
+            match e.section {
+                Section::Untracked => return Addable::New,
+                Section::Changes => out = Addable::Changes,
+                Section::Staged | Section::Conflicts => {}
+            }
+        }
+        out
+    }
+
+    /// The change a folder is coloured by: the most pressing one under it
+    /// (conflicts, then edits, then new files, then staged additions).
+    pub fn folder_change(&self, rel: &str) -> Option<Change> {
+        let rank = |c: Change| match c {
+            Change::Conflicted => 0,
+            Change::Modified | Change::Deleted | Change::Renamed | Change::Copied | Change::TypeChanged => 1,
+            Change::Untracked => 2,
+            Change::Added => 3,
+        };
+        self.entries_under(rel).map(|e| e.change).min_by_key(|c| rank(*c))
+    }
+
     pub fn section(&self, section: Section) -> impl Iterator<Item = &StatusEntry> {
         self.entries.iter().filter(move |e| e.section == section)
     }
@@ -1443,6 +1490,45 @@ mod tests {
         let listed = git.read_ok(&dir, &["ls-files", "-s", "--", "n.txt"])?;
         assert!(listed.starts_with("100644 "), "{listed}");
         Ok(())
+    }
+
+    #[test]
+    fn what_add_would_do() {
+        let e = |path: &str, section, change| StatusEntry {
+            path: path.into(),
+            orig_path: None,
+            section,
+            change,
+        };
+        let status = Status {
+            entries: vec![
+                e("src/a.rs", Section::Changes, Change::Modified),
+                e("src/new.rs", Section::Untracked, Change::Untracked),
+                e("docs/x.md", Section::Staged, Change::Added),
+                e("lib/m.rs", Section::Staged, Change::Modified),
+                e("lib/m.rs", Section::Changes, Change::Modified),
+                e("Inner/", Section::Untracked, Change::Untracked),
+                e("c.txt", Section::Conflicts, Change::Conflicted),
+            ],
+            ..Status::default()
+        };
+        assert_eq!(status.addable("src/a.rs"), Addable::Changes);
+        assert_eq!(status.addable("src/new.rs"), Addable::New);
+        assert_eq!(status.addable("src"), Addable::New);
+        assert_eq!(status.addable("docs/x.md"), Addable::Nothing);
+        assert_eq!(status.addable("docs"), Addable::Nothing);
+        assert_eq!(status.addable("lib"), Addable::Changes);
+        assert_eq!(status.addable("README.md"), Addable::Nothing);
+        assert_eq!(status.addable("Inner"), Addable::New);
+        assert_eq!(status.addable("c.txt"), Addable::Nothing);
+        // "sr" is not a folder of "src/…".
+        assert_eq!(status.addable("sr"), Addable::Nothing);
+        assert_eq!(status.addable("."), Addable::New);
+        assert_eq!(status.folder_change("src"), Some(Change::Modified));
+        assert_eq!(status.folder_change("docs"), Some(Change::Added));
+        assert_eq!(status.folder_change("Inner"), Some(Change::Untracked));
+        assert_eq!(status.folder_change("."), Some(Change::Conflicted));
+        assert_eq!(status.folder_change("none"), None);
     }
 
     #[test]

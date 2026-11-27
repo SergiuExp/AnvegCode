@@ -1271,3 +1271,29 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] Same from iTerm and from VS Code's terminal: their names show.
 - [ ] Stop It and Open Here: the Terminal's claude exits and the session opens in the app.
 - [ ] When the dialog appears with no obvious place, note what it says it runs in (and tell Claude if it says "this app").
+
+**Follow-up (2026-11-27): Files tab ▸ Add to Git only when there is something to add; git colours.** The owner saw Add to Git on files already in git, and asked for files not in git in red and ignored ones in orange.
+- **The menu item follows the file's state** (`Status::addable`, through `GitStore::addable`):
+  - a new file, an ignored one, or a folder with new files in it: **Add to Git**;
+  - a tracked file (or a folder) with edits not staged: **Stage Changes** (the same `git add`);
+  - tracked and unchanged, or all of it staged already: nothing;
+  - while the repository's status is still loading, Add to Git is offered, as before.
+- **Colours** (`change_color`, shared with the Git tab so a file looks the same in both):
+  - not in git: red;
+  - ignored: orange (shown with the eye button; also the Git tab's Ignored list);
+  - edited: blue (was orange, which now means ignored);
+  - added: green;
+  - renamed: teal;
+  - deleted: grey;
+  - conflicted: purple.
+- **Folders** take the colour of the most pressing change inside them (`Status::folder_change`): conflicts, then edits, then new files, then additions. A folder of new files is red.
+
+**Verified (sandbox):** a repository with an edited file, new files, a folder of new images and an ignored `target/`.
+- Colours: `img/` and the new files red; `src/` blue; `lib.rs` blue with M; `target/` orange once ignored files were shown.
+- Right-click menus: README.md (tracked, unchanged) had no Add to Git; `untracked.txt` had Add to Git; `lib.rs` had Stage Changes; `target/` had Add to Git.
+- The Git tab showed the same colours.
+- Core test `what_add_would_do`.
+
+**Manual check (Mac)**
+- [ ] Files tab: right-click a committed, unchanged file: no Add to Git. Right-click a new file: Add to Git; after it, it turns green and the item is gone.
+- [ ] Show ignored files (eye button): they're orange; new files red; edited files blue, in both themes.
