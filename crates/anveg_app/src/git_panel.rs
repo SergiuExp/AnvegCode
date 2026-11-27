@@ -22,6 +22,7 @@ use anveg_core::time::{now_millis, relative};
 use futures::StreamExt as _;
 use gpui_cn::prelude::*;
 use gpui_cn::{Switch, Textarea, TextareaState};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -406,6 +407,9 @@ pub struct GitPanel {
     /// Filling the field from code (a draft, Recent, Amend), not typing.
     filling: bool,
     recent_menu: Entity<gpui_cn::MenuState>,
+    /// Rows left out of the next commit (unchecked), by [`row_key`]. Every
+    /// row is checked unless listed here.
+    excluded: std::collections::HashSet<String>,
     amend: bool,
     busy: Option<String>,
     network: Option<NetworkJob>,
@@ -438,6 +442,7 @@ impl GitPanel {
         let subs = vec![
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.sync_draft(window, cx);
+                this.prune_excluded(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&message, window, |this, state, event, window, cx| match event {
@@ -465,6 +470,7 @@ impl GitPanel {
             draft_repo: None,
             filling: false,
             recent_menu,
+            excluded: std::collections::HashSet::new(),
             amend: false,
             busy: None,
             network: None,
@@ -831,18 +837,79 @@ impl GitPanel {
         cx.notify();
     }
 
-    /// ⌘↩: what the commit button shows (Stage All and Commit when nothing
-    /// is staged but there are changes).
+    /// ⌘↩: commit the checked files.
     fn commit_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stage_all = !self.amend
-            && self
-                .repo_state(cx)
-                .and_then(|r| r.status)
-                .is_some_and(|s| !s.has_staged() && !s.is_clean());
-        self.commit(stage_all, window, cx);
+        self.commit(window, cx);
     }
 
-    fn commit(&mut self, stage_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn is_checked(&self, section: Section, path: &str) -> bool {
+        !self.excluded.contains(&row_key(section, path))
+    }
+
+    fn set_checked(&mut self, section: Section, paths: &[String], on: bool, cx: &mut Context<Self>) {
+        for p in paths {
+            let key = row_key(section, p);
+            if on {
+                self.excluded.remove(&key);
+            } else {
+                self.excluded.insert(key);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Forget unchecked rows that are gone (committed, discarded, …).
+    fn prune_excluded(&mut self, cx: &App) {
+        if self.excluded.is_empty() {
+            return;
+        }
+        let Some(status) = self.repo_state(cx).and_then(|r| r.status) else {
+            return;
+        };
+        let present: std::collections::HashSet<String> =
+            status.entries.iter().map(|e| row_key(e.section, &e.path)).collect();
+        self.excluded.retain(|k| present.contains(k));
+    }
+
+    /// What Commit would do with the checked rows.
+    fn selection(&self, status: &Status) -> Selection {
+        let rows = |section| status.section(section).filter(|e| !e.is_inner_repo());
+        let mut sel = Selection::default();
+        let mut checked = std::collections::BTreeSet::new();
+        let mut checked_unstaged = std::collections::HashSet::new();
+        for section in [Section::Changes, Section::Untracked] {
+            for e in rows(section) {
+                if self.is_checked(section, &e.path) {
+                    sel.stage = true;
+                    checked_unstaged.insert(e.path.clone());
+                    checked.insert(e.path.clone());
+                } else {
+                    sel.skip.push(e.path.clone());
+                }
+            }
+        }
+        for e in rows(Section::Staged) {
+            if self.is_checked(Section::Staged, &e.path) {
+                checked.insert(e.path.clone());
+            } else if !checked_unstaged.contains(&e.path) {
+                // Its unstaged part is checked: the whole file goes in.
+                sel.leave_out.push(e.path.clone());
+                sel.leave_out.extend(e.orig_path.clone());
+            }
+        }
+        sel.count = checked.len();
+        sel
+    }
+
+    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(status) = self.repo_state(cx).and_then(|r| r.status) else {
+            return;
+        };
+        let selection = self.selection(&status);
+        if selection.count == 0 && !self.amend {
+            cx.emit(WorkspaceEvent::Toast("Check the files to commit first.".into()));
+            return;
+        }
         let text = self.message.read(cx).value().to_string();
         if anveg_core::commit_messages::summary_line(&text).is_empty() {
             cx.emit(WorkspaceEvent::Toast(
@@ -862,10 +929,14 @@ impl GitPanel {
         self.busy = Some("Committing…".into());
         cx.notify();
         let task = cx.background_spawn(async move {
-            if stage_all {
-                git.stage_all(&root)?;
-            }
-            git.commit(&root, &message, amend)
+            git.commit_selected(
+                &root,
+                &message,
+                amend,
+                selection.stage,
+                &selection.skip,
+                &selection.leave_out,
+            )
         });
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -1426,7 +1497,7 @@ impl GitPanel {
             .map(|r| model(cx).read(cx).commit_messages.recent(r).to_vec())
             .unwrap_or_default();
         let weak = cx.entity().downgrade();
-        let nothing_staged = !status.has_staged() && !self.amend;
+        let selection = self.selection(status);
         let busy = self.busy.is_some();
         div()
             .flex()
@@ -1495,22 +1566,21 @@ impl GitPanel {
                     )
             )
             // On its own line, full width: fits a narrow sidebar.
-            .child(if nothing_staged && !status.is_clean() {
-                Button::new("commit-all")
-                    .primary()
-                    .size(ButtonSize::Sm)
-                    .w_full()
-                    .label("Stage All and Commit (⌘↩)")
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx)))
-            } else {
+            .child({
+                let n = selection.count;
+                let files = if n == 1 { "1 File".to_owned() } else { format!("{n} Files") };
+                let label = match (self.amend, n) {
+                    (true, 0) => "Amend (⌘↩)".to_owned(),
+                    (true, _) => format!("Amend with {files} (⌘↩)"),
+                    (false, _) => format!("Commit {files} (⌘↩)"),
+                };
                 Button::new("commit")
                     .primary()
                     .size(ButtonSize::Sm)
                     .w_full()
-                    .label(if self.amend { "Amend (⌘↩)" } else { "Commit (⌘↩)" })
-                    .disabled(busy || nothing_staged)
-                    .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx)))
+                    .label(label)
+                    .disabled(busy || (n == 0 && !self.amend))
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx)))
             })
             .into_any_element()
     }
@@ -1543,6 +1613,7 @@ impl GitPanel {
                 .filter(|e| !e.is_inner_repo())
                 .map(|e| e.path.clone())
                 .collect();
+            let check_paths = paths.clone();
             let header_button = match section {
                 Section::Staged => Some(
                     Button::new(SharedString::from(format!("all-{label}")))
@@ -1564,14 +1635,29 @@ impl GitPanel {
                 ),
                 Section::Changes | Section::Untracked | Section::Conflicts => None,
             };
+            // Check or uncheck the whole section (not conflicts: those are
+            // resolved first).
+            let header_check = (section != Section::Conflicts && !check_paths.is_empty()).then(|| {
+                let all = check_paths.iter().all(|p| self.is_checked(section, p));
+                let weak = cx.entity().downgrade();
+                let paths = check_paths.clone();
+                Checkbox::new(SharedString::from(format!("check-all-{label}")))
+                    .checked(all)
+                    .tooltip(if all { "Leave all out of the commit" } else { "Include all in the commit" })
+                    .on_click(move |on, _, cx| {
+                        let _ = weak.update(cx, |this, cx| this.set_checked(section, &paths, *on, cx));
+                    })
+            });
             list = list.child(
                 div()
                     .flex()
                     .items_center()
+                    .gap_1p5()
                     .px_2()
                     .pt_1()
                     .text_xs()
                     .text_color(c.muted_foreground)
+                    .children(header_check)
                     .child(div().flex_1().child(format!("{label} ({})", entries.len())))
                     .children(header_button),
             );
@@ -1818,6 +1904,7 @@ impl GitPanel {
         };
         let color = change_color(entry.change, &c);
         let id = SharedString::from(format!("e-{section:?}-{i}"));
+        let check_id = id.clone();
         let open = entry.clone();
         let mut buttons = div().flex().gap_0p5();
         match section {
@@ -1878,6 +1965,21 @@ impl GitPanel {
             .gap_1()
             .cursor_pointer()
             .hover(|el| el.bg(c.accent.opacity(0.5)))
+            .when(section != Section::Conflicts, |el| {
+                let checked = self.is_checked(section, &entry.path);
+                let weak = cx.entity().downgrade();
+                let path = vec![entry.path.clone()];
+                el.child(
+                    Checkbox::new(SharedString::from(format!("{check_id}-c")))
+                        .checked(checked)
+                        .tooltip(if checked { "In the next commit" } else { "Left out of the next commit" })
+                        .on_click(move |on, _, cx| {
+                            // Not also the row's click (which opens the diff).
+                            cx.stop_propagation();
+                            let _ = weak.update(cx, |this, cx| this.set_checked(section, &path, *on, cx));
+                        }),
+                )
+            })
             .child(div().w(px(14.)).text_xs().text_color(color).child(entry.change.letter()))
             .child(div().text_sm().text_color(color).child(name))
             .child(
@@ -2401,6 +2503,24 @@ impl GitPanel {
         }
         list.into_any_element()
     }
+}
+
+/// A row of the Changes view, for its checkbox.
+fn row_key(section: Section, path: &str) -> String {
+    format!("{section:?}\u{0}{path}")
+}
+
+/// What Commit does with the checked rows (`GitPanel::selection`).
+#[derive(Default)]
+struct Selection {
+    /// Stage the checked new and changed files first.
+    stage: bool,
+    /// Unchecked new and changed files: not staged.
+    skip: Vec<String>,
+    /// Unchecked staged files: left out of this commit, still staged.
+    leave_out: Vec<String>,
+    /// Checked files.
+    count: usize,
 }
 
 /// File colours, here and in the Files tab: not in git red, added green,

@@ -361,16 +361,7 @@ impl Git {
     /// Stage every change and new file, except inner repositories (git
     /// would refuse one without commits, or record only a link to it).
     pub fn stage_all(&self, repo: &Path) -> Result<()> {
-        let inner: Vec<String> = self
-            .status(repo)
-            .map(|s| s.inner_repos().map(|p| format!(":(exclude){p}")).collect())
-            .unwrap_or_default();
-        let mut args = vec!["add", "-A"];
-        if !inner.is_empty() {
-            args.extend(["--", "."]);
-            args.extend(inner.iter().map(String::as_str));
-        }
-        self.write(repo, &args).map(drop)
+        self.stage_all_except(repo, &[])
     }
 
     pub fn unstage(&self, repo: &Path, paths: &[&str]) -> Result<()> {
@@ -464,6 +455,11 @@ impl Git {
     /// Commit the index with `message`. Hooks run as usual; when one fails
     /// its output is the error.
     pub fn commit(&self, repo: &Path, message: &str, amend: bool) -> Result<String> {
+        self.commit_with_index(repo, message, amend, None)
+    }
+
+    /// `git commit`, from the index at `index` when given (`GIT_INDEX_FILE`).
+    fn commit_with_index(&self, repo: &Path, message: &str, amend: bool, index: Option<&Path>) -> Result<String> {
         let mut cmd = self
             .write_cmd(repo)
             .args(["commit", "-F", "-"])
@@ -473,7 +469,77 @@ impl Git {
         if amend {
             cmd = cmd.arg("--amend");
         }
+        if let Some(index) = index {
+            cmd = cmd.var("GIT_INDEX_FILE", index.to_string_lossy().into_owned());
+        }
         Ok(process::run(&cmd)?.check()?.stdout_str())
+    }
+
+    /// Commit the files the Git tab has checked:
+    ///
+    /// - with `stage`, first stage every new and changed file except
+    ///   `skip` (unchecked rows; inner repositories are always skipped), as
+    ///   Stage All does;
+    /// - then commit the index without `leave_out` (unchecked staged
+    ///   files): those are committed from a copy of the index in which they
+    ///   are set back to HEAD, so they stay staged for a later commit (as
+    ///   `git commit --only` does).
+    pub fn commit_selected(
+        &self,
+        repo: &Path,
+        message: &str,
+        amend: bool,
+        stage: bool,
+        skip: &[String],
+        leave_out: &[String],
+    ) -> Result<String> {
+        if stage {
+            self.stage_all_except(repo, skip)?;
+        }
+        if leave_out.is_empty() {
+            return self.commit(repo, message, amend);
+        }
+        let index = self.read_ok(repo, &["rev-parse", "--git-path", "index"])?;
+        let index = repo.join(index.trim());
+        let temp = index.with_file_name("anveg-commit-index");
+        std::fs::copy(&index, &temp)
+            .with_context(|| format!("could not copy the index to {}", temp.display()))?;
+        let result = (|| {
+            let temp_var = temp.to_string_lossy().into_owned();
+            let mut args: Vec<&str> = if self.has_head(repo) {
+                vec!["reset", "-q", "HEAD", "--"]
+            } else {
+                vec!["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"]
+            };
+            args.extend(leave_out.iter().map(String::as_str));
+            let cmd = self
+                .write_cmd(repo)
+                .var("GIT_INDEX_FILE", temp_var)
+                .args(args.iter().copied());
+            // `git reset` exits 1 when files are left modified: not a failure.
+            let out = process::run(&cmd)?;
+            if !out.success() && out.code != Some(1) {
+                out.check()?;
+            }
+            self.commit_with_index(repo, message, amend, Some(&temp))
+        })();
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+
+    /// `git add -A` everywhere but inner repositories and `skip`.
+    pub fn stage_all_except(&self, repo: &Path, skip: &[String]) -> Result<()> {
+        let mut excludes: Vec<String> = self
+            .status(repo)
+            .map(|s| s.inner_repos().map(|p| format!(":(exclude){p}")).collect())
+            .unwrap_or_default();
+        excludes.extend(skip.iter().map(|p| format!(":(exclude,literal){p}")));
+        let mut args = vec!["add", "-A"];
+        if !excludes.is_empty() {
+            args.extend(["--", "."]);
+            args.extend(excludes.iter().map(String::as_str));
+        }
+        self.write(repo, &args).map(drop)
     }
 
     pub fn last_commit_message(&self, repo: &Path) -> Result<String> {
@@ -1500,6 +1566,36 @@ mod tests {
         git.set_index_content(&dir, "n.txt", b"x\n")?;
         let listed = git.read_ok(&dir, &["ls-files", "-s", "--", "n.txt"])?;
         assert!(listed.starts_with("100644 "), "{listed}");
+        Ok(())
+    }
+
+    #[test]
+    fn committing_checked_files_only() -> Result<()> {
+        let (_t, dir) = repo()?;
+        let git = Git::default();
+        sh(&dir, "printf a > a.txt; printf b > b.txt; git add . && git commit -qm base")?;
+        // a: staged and kept out; b: changed and unchecked; c: new and
+        // checked; d: staged and checked.
+        sh(&dir, "printf A > a.txt; git add a.txt; printf B > b.txt; printf c > c.txt; printf d > d.txt; git add d.txt")?;
+        git.commit_selected(&dir, "pick", false, true, &["b.txt".into()], &["a.txt".into()])?;
+        let files = git.read_ok(&dir, &["show", "--name-only", "--format=", "HEAD"])?;
+        let mut files: Vec<&str> = files.lines().collect();
+        files.sort_unstable();
+        assert_eq!(files, ["c.txt", "d.txt"]);
+        let status = git.status(&dir)?;
+        // a stays staged (as it was), b stays unstaged.
+        assert_eq!(status.section(Section::Staged).map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+        assert_eq!(status.section(Section::Changes).map(|e| e.path.as_str()).collect::<Vec<_>>(), ["b.txt"]);
+        assert_eq!(git.blob(&dir, ":a.txt")?.as_deref(), Some(&b"A"[..]));
+        // No temporary index left behind.
+        assert!(!git.git_dir(&dir)?.join("anveg-commit-index").exists());
+        // Before the first commit, too.
+        let (_t2, fresh) = repo()?;
+        sh(&fresh, "printf x > x.txt; printf y > y.txt; git add .")?;
+        git.commit_selected(&fresh, "first", false, false, &[], &["y.txt".into()])?;
+        let files = git.read_ok(&fresh, &["show", "--name-only", "--format=", "HEAD"])?;
+        assert_eq!(files.trim(), "x.txt");
+        assert_eq!(git.blob(&fresh, ":y.txt")?.as_deref(), Some(&b"y"[..]));
         Ok(())
     }
 

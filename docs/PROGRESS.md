@@ -1349,3 +1349,28 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] Two projects: each repository keeps its own unfinished message.
 - [ ] ⌘↩ in the field commits; with nothing staged it stages all and commits.
 - [ ] Recent ▸ a message, then Amend: the field holds the chosen message, not replaced.
+
+**Follow-up (2026-11-27): checkboxes to choose the files of a commit.** The owner asked for a checkbox on each file to include it in a commit or leave it out, all checked by default.
+- **Checkboxes.** Every row in Staged, Changes and Untracked has one, and each section header has one that checks or unchecks the whole section.
+  - Conflicts have none: they are resolved first.
+  - Inner repositories have none: they are never committed with the rest.
+  - Clicking a checkbox doesn't open the file's diff.
+- **The commit button** says what it does: "Commit 3 Files (⌘↩)", or with Amend, "Amend with 3 Files". It replaces Commit and Stage All and Commit. It is disabled when nothing is checked (Amend can still change just the message).
+- **What Commit does** (`Git::commit_selected`):
+  - Checked new and changed files are staged first (`git add -A` everywhere except unchecked rows and inner repositories).
+  - Unchecked new and changed files are not staged.
+  - Unchecked staged files are left out of the commit but stay staged. The commit is made from a copy of the index in which they are set back to HEAD (`GIT_INDEX_FILE`, as `git commit --only` does). Before the first commit, they are removed from the copy instead.
+  - The copy is always deleted.
+  - A file staged in part has two rows, Staged and Changes. Checking its Changes row includes the whole file.
+- **Unchecked rows stay unchecked** after a commit, for the files still listed, as in GitHub Desktop: a file left out once usually stays out. Files that appear later start checked. The choice is kept while the app runs, not across restarts.
+
+**Verified (sandbox):**
+- Setup: a staged README, a changed `main.rs` and 11 new files. Everything started checked: "Commit 13 Files".
+- I unchecked Untracked, re-checked `untracked.txt` and unchecked README: "Commit 2 Files".
+- The commit held exactly `src/main.rs` and `untracked.txt`. README was still staged and the other new files untracked. No diff opened from the checkbox clicks.
+- Core test `committing_checked_files_only`: kept-out staged file, unchecked changed file, checked new and staged files, and before the first commit; no temporary index left.
+
+**Manual checks (Mac)**
+- [ ] Uncheck a staged file and commit: it isn't in the commit and is still staged afterwards.
+- [ ] Uncheck a section header: all its rows uncheck; check it again: all check.
+- [ ] A pre-commit hook that fails: the commit fails with its output, and nothing is lost (the staged files are as before).
