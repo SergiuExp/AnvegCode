@@ -19,9 +19,12 @@ use gpui_cn::{ContextMenu, Input, InputEvent, InputState, MenuEntry, MenuItem as
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Task, UniformListScrollHandle,
-    Window, div, px, uniform_list,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Task, UniformListScrollHandle,
+    Window, div, hsla, px, uniform_list, FontWeight,
 };
+use gpui_kit::assets::IconName;
+
+use crate::file_icons::{FOLDER, FOLDER_OPEN, file_icon};
 
 use crate::git_panel::{GitStore, IGNORED_COLOR, change_color};
 use crate::model::model;
@@ -29,6 +32,12 @@ use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
 
 const ROW: f32 = 24.;
+/// Left padding of a top-level row, and the indent per level.
+const INDENT_START: f32 = 6.;
+const INDENT: f32 = 14.;
+/// The chevron column, and the space between it and the icon.
+const CHEVRON: f32 = 14.;
+const GAP: f32 = 2.;
 
 type MenuAction = Box<dyn Fn(&mut FilesPanel, &mut Context<FilesPanel>)>;
 
@@ -43,6 +52,23 @@ struct TreeRow {
     is_dir: bool,
     ignored: bool,
     root: bool,
+    /// A line under an expanded folder that has nothing to list: "Empty",
+    /// or why it can't be read. Not selectable; `path` is the folder's.
+    note: Option<String>,
+}
+
+impl TreeRow {
+    fn note(dir: &Path, depth: usize, text: String) -> Self {
+        Self {
+            path: dir.to_path_buf(),
+            name: String::new(),
+            depth,
+            is_dir: false,
+            ignored: false,
+            root: false,
+            note: Some(text),
+        }
+    }
 }
 
 pub struct FilesPanel {
@@ -230,30 +256,42 @@ impl FilesPanel {
                 is_dir: true,
                 ignored: false,
                 root: true,
+                note: None,
             });
-            self.push_children(root, 1, &mut rows);
+            self.push_children(root, 1, false, &mut rows);
         }
         self.rows = rows;
     }
 
-    fn push_children(&self, dir: &Path, depth: usize, rows: &mut Vec<TreeRow>) {
+    /// `in_ignored`: `dir` is ignored, so everything in it is too (git
+    /// ignores a folder's contents with it).
+    fn push_children(&self, dir: &Path, depth: usize, in_ignored: bool, rows: &mut Vec<TreeRow>) {
         if !self.expanded.contains(dir) {
+            return;
+        }
+        if let Some(error) = self.errors.get(dir) {
+            rows.push(TreeRow::note(dir, depth, format!("Can't read this folder: {error}")));
             return;
         }
         let Some(entries) = self.children.get(dir) else {
             return;
         };
+        if entries.is_empty() {
+            rows.push(TreeRow::note(dir, depth, "Empty".to_owned()));
+            return;
+        }
         for e in entries {
             rows.push(TreeRow {
                 path: e.path.clone(),
                 name: e.name.clone(),
                 depth,
                 is_dir: e.is_dir,
-                ignored: e.ignored,
+                ignored: e.ignored || in_ignored,
                 root: false,
+                note: None,
             });
             if e.is_dir {
-                self.push_children(&e.path, depth + 1, rows);
+                self.push_children(&e.path, depth + 1, e.ignored || in_ignored, rows);
             }
         }
     }
@@ -661,151 +699,325 @@ impl FilesPanel {
         entries
     }
 
-    fn render_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    // -----------------------------------------------------------------
+    // Keyboard
+    // -----------------------------------------------------------------
+
+    fn selectable(&self, ix: usize) -> bool {
+        self.rows.get(ix).is_some_and(|r| r.note.is_none())
+    }
+
+    fn selected_ix(&self) -> Option<usize> {
+        let path = self.selected.as_deref()?;
+        self.rows.iter().position(|r| r.note.is_none() && r.path == path)
+    }
+
+    fn select_ix(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(row) = self.rows.get(ix) {
+            self.selected = Some(row.path.clone());
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            cx.notify();
+        }
+    }
+
+    fn move_selection(&mut self, down: bool, cx: &mut Context<Self>) {
+        let n = self.rows.len();
+        let next = match self.selected_ix() {
+            None => (0..n).find(|&i| self.selectable(i)),
+            Some(i) if down => (i + 1..n).find(|&j| self.selectable(j)),
+            Some(i) => (0..i).rev().find(|&j| self.selectable(j)),
+        };
+        if let Some(ix) = next {
+            self.select_ix(ix, cx);
+        }
+    }
+
+    /// ↑ ↓ move, → opens a folder (then goes into it), ← closes it (or
+    /// goes up to its folder), ↩ opens a file or opens/closes a folder.
+    fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        if m.platform || m.control || m.alt || m.function {
+            return;
+        }
+        let current = self.selected_ix().and_then(|ix| Some((ix, self.rows.get(ix)?.clone())));
+        match (event.keystroke.key.as_str(), current) {
+            ("down", _) => self.move_selection(true, cx),
+            ("up", _) => self.move_selection(false, cx),
+            ("right", Some((ix, row))) if row.is_dir => {
+                if !self.expanded.contains(&row.path) {
+                    self.toggle(&row.path, cx);
+                } else if self.rows.get(ix + 1).is_some_and(|r| r.depth > row.depth) && self.selectable(ix + 1) {
+                    self.select_ix(ix + 1, cx);
+                }
+            }
+            ("left", Some((ix, row))) => {
+                if row.is_dir && self.expanded.contains(&row.path) {
+                    self.toggle(&row.path, cx);
+                } else if let Some(parent) =
+                    (0..ix).rev().find(|&j| self.rows.get(j).is_some_and(|r| r.depth < row.depth))
+                {
+                    self.select_ix(parent, cx);
+                }
+            }
+            ("enter", Some((_, row))) => self.click(&row, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    /// The folder New File and New Folder go in: the selected folder, the
+    /// selected file's folder, or the main folder.
+    fn target_dir(&self) -> Option<PathBuf> {
+        let row = self.selected_ix().and_then(|ix| self.rows.get(ix));
+        match row {
+            Some(r) if r.is_dir => Some(r.path.clone()),
+            Some(r) => r.path.parent().map(Path::to_path_buf),
+            None => self.roots.first().cloned(),
+        }
+    }
+
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        self.expanded.retain(|p| self.roots.contains(p));
+        self.watches.retain(|p, _| self.roots.contains(p));
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| !self.roots.iter().any(|r| s.parent() == Some(r.as_path()) || s == r))
+        {
+            self.selected = None;
+        }
+        self.rebuild_rows();
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Rendering
+    // -----------------------------------------------------------------
+
+    fn render_rows(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let c = Colors::of(cx);
+        let dark = cx.theme().is_dark();
+        let folder_color = if dark {
+            hsla(0.58, 0.45, 0.66, 1.0)
+        } else {
+            hsla(0.58, 0.55, 0.52, 1.0)
+        };
+        let guide = c.foreground.opacity(if dark { 0.10 } else { 0.12 });
+        let focused = self.focus.is_focused(window);
         let store = self.store.read(cx);
         let menu_entity = cx.entity();
         range
             .filter_map(|ix| {
                 let row = self.rows.get(ix)?.clone();
-                let change = if row.is_dir {
-                    None
-                } else {
-                    store.file_change(&row.path)
-                };
+                let indent = INDENT_START + row.depth as f32 * INDENT;
+                // A line down from each enclosing folder's chevron.
+                let guides = (0..row.depth).map(|level| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(INDENT_START + level as f32 * INDENT + CHEVRON / 2.))
+                        .w(px(1.))
+                        .bg(guide)
+                });
+                let base = div()
+                    .relative()
+                    .h(px(ROW))
+                    .pl(px(indent))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .children(guides);
+                if let Some(note) = row.note {
+                    return Some(
+                        base.child(div().w(px(CHEVRON + GAP)).flex_none())
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .italic()
+                                    .text_color(if self.errors.contains_key(&row.path) {
+                                        c.destructive
+                                    } else {
+                                        c.muted_foreground.opacity(0.8)
+                                    })
+                                    .child(note),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                let change = if row.is_dir { None } else { store.file_change(&row.path) };
                 // A folder takes the colour of the most pressing change in
                 // it (a folder of new files is red).
-                let dir_change = (row.is_dir && !row.root)
-                    .then(|| store.dir_change(&row.path))
-                    .flatten();
-                let color = match change.or(dir_change) {
+                let dir_change = (row.is_dir && !row.root).then(|| store.dir_change(&row.path)).flatten();
+                let name_color = match change.or(dir_change) {
                     Some(ch) => change_color(ch, &c),
                     None if row.ignored => IGNORED_COLOR,
                     None => c.foreground,
                 };
                 let selected = self.selected.as_deref() == Some(row.path.as_path());
+                let expanded = row.is_dir && self.expanded.contains(&row.path);
+                let chevron = div().w(px(CHEVRON)).flex_none().flex().justify_center().when(row.is_dir, |el| {
+                    el.child(
+                        Icon::from(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                            .size_3()
+                            .text_color(c.muted_foreground),
+                    )
+                });
                 let icon = if row.is_dir {
-                    if self.expanded.contains(&row.path) {
-                        "▾"
-                    } else {
-                        "▸"
-                    }
+                    Icon::from(if expanded { FOLDER_OPEN } else { FOLDER })
+                        .size(px(15.))
+                        .text_color(if row.ignored { IGNORED_COLOR.opacity(0.75) } else { folder_color })
                 } else {
-                    ""
+                    Icon::from(file_icon(&row.name))
+                        .size(px(14.))
+                        .text_color(if row.ignored { IGNORED_COLOR.opacity(0.75) } else { c.muted_foreground })
                 };
-                let error = self.errors.get(&row.path).cloned();
-                let r2 = row.clone();
-                let el = div()
-                    .id(SharedString::from(format!("f-{}", row.path.display())))
-                    .h(px(ROW))
-                    .pl(px(6. + row.depth as f32 * 12.))
-                    .pr_2()
+                // Right: a file's change letter, or a dot on a folder with
+                // changes inside.
+                let badge = div()
+                    .w(px(14.))
+                    .flex_none()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .justify_end()
+                    .text_xs()
+                    .text_color(name_color)
+                    .when_some(change, |el, ch| el.child(ch.letter()))
+                    .when(dir_change.is_some(), |el| {
+                        el.child(div().size(px(6.)).rounded_full().bg(name_color))
+                    });
+                let error = self.errors.contains_key(&row.path);
+                let r2 = row.clone();
+                let el = base
+                    .id(SharedString::from(format!("f-{}", row.path.display())))
                     .cursor_pointer()
-                    .when(selected, |el| el.bg(c.selected_row))
-                    .hover(|el| el.bg(c.accent.opacity(0.5)))
-                    .child(div().w(px(10.)).text_xs().text_color(c.muted_foreground).child(icon))
+                    .when(row.root && ix > 0, |el| el.border_t_1().border_color(c.border))
+                    .when(selected, |el| {
+                        el.bg(if focused { c.selected_row } else { c.selected_row.opacity(0.55) })
+                    })
+                    .when(!selected, |el| el.hover(|el| el.bg(c.accent.opacity(0.5))))
+                    .when(row.ignored, |el| el.opacity(0.8))
+                    .child(chevron)
+                    .child(div().w(px(GAP)).flex_none())
+                    .child(icon)
                     .child(
                         div()
+                            .ml(px(6.))
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
-                            .text_color(color)
-                            .when(row.root, |el| el.font_weight(gpui_kit::FontWeight::SEMIBOLD))
+                            .text_color(name_color)
+                            .when(row.is_dir, |el| el.font_weight(FontWeight::MEDIUM))
+                            .when(row.root, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .child(row.name.clone()),
                     )
-                    .children(change.map(|ch| {
-                        div().text_xs().text_color(color).child(ch.letter())
-                    }))
-                    .children(error.map(|_| div().text_xs().text_color(c.destructive).child("!")))
-                    .on_click(cx.listener(move |this, _, _, cx| this.click(&r2, cx)));
+                    .when(error, |el| el.child(div().text_xs().text_color(c.destructive).mr_1().child("!")))
+                    .child(badge)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        window.focus(&this.focus, cx);
+                        this.click(&r2, cx);
+                    }));
                 let row_for_menu = row.clone();
                 let entity = menu_entity.clone();
                 Some(
-                    ContextMenu::new(
-                        SharedString::from(format!("fm-{}", row.path.display())),
-                        &self.menu,
-                    )
-                    .items(move |_, cx| entity.read(cx).menu_for(&row_for_menu, &entity, cx))
-                    .child(el)
-                    .into_any_element(),
+                    ContextMenu::new(SharedString::from(format!("fm-{}", row.path.display())), &self.menu)
+                        .items(move |_, cx| entity.read(cx).menu_for(&row_for_menu, &entity, cx))
+                        .child(el)
+                        .into_any_element(),
                 )
             })
             .collect()
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = Colors::of(cx);
+        let tool = |id: &'static str, icon: IconName, tip: &'static str| {
+            Button::new(id).ghost().size(ButtonSize::Sm).icon(Icon::from(icon)).tooltip(tip)
+        };
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_1()
+            .py_1()
+            .border_b_1()
+            .border_color(c.border)
+            .child(
+                div().flex_1().min_w_0().child(
+                    Button::new("files-go-to")
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .icon(Icon::from(IconName::Search))
+                        .label("Go to File… ⌘P")
+                        .tooltip("Open a file by typing part of its name")
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::QuickOpen), cx)),
+                ),
+            )
+            .child(tool("files-new-file", IconName::FilePlus, "New File…").on_click(cx.listener(
+                |this, _, _, cx| {
+                    if let Some(dir) = this.target_dir() {
+                        this.new_entry(dir, false, cx);
+                    }
+                },
+            )))
+            .child(tool("files-new-folder", IconName::FolderPlus, "New Folder…").on_click(cx.listener(
+                |this, _, _, cx| {
+                    if let Some(dir) = this.target_dir() {
+                        this.new_entry(dir, true, cx);
+                    }
+                },
+            )))
+            .child(
+                tool("files-collapse", IconName::ChevronsDownUp, "Collapse All Folders")
+                    .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
+            )
+            .child(
+                tool(
+                    "show-ignored",
+                    if self.show_ignored { IconName::Eye } else { IconName::EyeOff },
+                    if self.show_ignored { "Hide Ignored Files" } else { "Show Ignored Files" },
+                )
+                .toggled(self.show_ignored)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_ignored = !this.show_ignored;
+                    for dir in this.expanded.clone() {
+                        this.list(dir, cx);
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(tool("files-refresh", IconName::RefreshCw, "Refresh").on_click(cx.listener(
+                |this, _, _, cx| {
+                    for dir in this.expanded.clone() {
+                        this.list(dir, cx);
+                    }
+                },
+            )))
     }
 }
 
 impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = Colors::of(cx);
         let count = self.rows.len();
         div()
             .id("files-panel")
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.on_key(event, cx)))
             .size_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(c.muted_foreground)
-                            .child("⌘P to open a file by name"),
-                    )
-                    .child(
-                        Button::new("show-ignored")
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .icon(Icon::from(if self.show_ignored {
-                                gpui_kit::assets::IconName::Eye
-                            } else {
-                                gpui_kit::assets::IconName::EyeOff
-                            }))
-                            .tooltip(if self.show_ignored {
-                                "Hide Ignored Files"
-                            } else {
-                                "Show Ignored Files"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_ignored = !this.show_ignored;
-                                for dir in this.expanded.clone() {
-                                    this.list(dir, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("files-refresh")
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .icon(Icon::from(gpui_kit::assets::IconName::RefreshCw))
-                            .tooltip("Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                for dir in this.expanded.clone() {
-                                    this.list(dir, cx);
-                                }
-                            })),
-                    ),
-            )
+            .child(self.render_toolbar(cx))
             .child(
                 uniform_list(
                     "file-rows",
                     count,
-                    cx.processor(|this, range: Range<usize>, window, cx| {
-                        this.render_rows(range, window, cx)
-                    }),
+                    cx.processor(|this, range: Range<usize>, window, cx| this.render_rows(range, window, cx)),
                 )
                 .track_scroll(&self.scroll)
+                .py_1()
                 .flex_1(),
             )
     }

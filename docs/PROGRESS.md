@@ -1418,3 +1418,25 @@ The owner found the installed app running three windows, each in its own full-sc
 **Manual checks (Mac)**
 - [ ] ⇧⌘↩ in the message field commits and pushes.
 - [ ] Update Project on a branch with no upstream only fetches; on one with an upstream that has diverged (fast-forward only), it fails with a clear explanation.
+
+**Follow-up (2026-11-27): Files tab: folders and files look different; a better tree.** The owner said folders and files looked the same in Files, and asked for the UI to be improved.
+- **Folders** have a filled folder icon (open when expanded), in a soft blue a little darker on light themes, with a chevron icon before it. Their names are in medium weight. The two folder glyphs are drawn in `file_icons.rs` (simple shapes, not copied from anywhere).
+- **Files** have an outline icon by type (`file_icons::file_icon`, Lucide icons bundled by `app_assets`), in the muted colour, under a blank chevron column: code, JSON, settings (TOML, YAML, dotfiles, Dockerfile, Makefile), lock files, text and Markdown, images, shell scripts, archives, spreadsheets, diffs, audio, video, fonts; anything else gets the plain file icon.
+- **Indent guides**: a faint line runs down from each open folder's chevron, so the depth reads at a glance.
+- **Right edge**: a file's change letter (U, M, A…) in a fixed column; a folder with changes inside gets a dot in the colour of its most pressing change.
+- **Empty and unreadable folders** say so under them ("Empty", or "Can't read this folder: …" in red) instead of showing nothing.
+- **Ignored**: everything inside an ignored folder is shown as ignored too (it was drawn as normal before).
+- **Keyboard**: after clicking in the tree, ↑ ↓ move, → opens a folder (then goes into it), ← closes it (or goes up to its folder), ↩ opens a file or opens/closes a folder. The selection is dimmed while the tree doesn't have focus.
+- **Toolbar**: Go to File… ⌘P (opens quick open), New File and New Folder (in the selected folder, the selected file's folder, or the main folder), Collapse All Folders, Show/Hide Ignored Files (shown pressed while on) and Refresh. A line separates it from the tree; projects with several roots get a line between roots.
+
+**Verified (sandbox):** dark and light themes.
+- Folder and file icons by type; the dot on `docs` and `docs/guides` (a new file inside), U on new files.
+- `empty-dir` expanded shows "Empty".
+- Show Ignored: `target` in orange with its open folder icon, and `target/out.bin` inside it orange too.
+- The keys: click `docs`, then ↓ ↓ → ↓ → (expands `empty-dir`), ↓ ↓ ↓ ↓ landed on `build.sh`, skipping the "Empty" line.
+- Unit test `icons_by_file_type`.
+
+**Manual checks (Mac)**
+- [ ] The tree in both themes on a Retina screen: icons crisp, folder blue readable, indent guides faint but visible.
+- [ ] The arrow keys and ↩ in the tree; typing in the editor afterwards doesn't move the tree.
+- [ ] New File and New Folder from the toolbar with a file selected create it in that file's folder.

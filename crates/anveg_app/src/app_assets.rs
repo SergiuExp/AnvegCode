@@ -5,7 +5,32 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, SharedString};
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Brain, FoldVertical, CircleStop, Eraser, Minimize2]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Brain,
+        FoldVertical,
+        CircleStop,
+        Eraser,
+        Minimize2,
+        // The Files tree (`file_icons`) and its toolbar.
+        FileCode,
+        FileBraces,
+        FileCog,
+        FileLock,
+        FileImage,
+        FileTerminal,
+        FileArchive,
+        FileSpreadsheet,
+        FileDiff,
+        FileMusic,
+        FileVideoCamera,
+        FileType,
+        FilePlus,
+        FolderPlus,
+        ChevronsDownUp,
+    ]
+);
 
 pub struct AppAssets;
 

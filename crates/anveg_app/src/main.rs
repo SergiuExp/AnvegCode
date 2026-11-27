@@ -13,6 +13,7 @@ mod dialogs;
 mod diff_view;
 mod docs;
 mod editor_view;
+mod file_icons;
 mod files_panel;
 mod git_panel;
 mod github;
