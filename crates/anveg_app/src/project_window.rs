@@ -198,6 +198,11 @@ pub struct ProjectWindow {
     _refresh_tx: futures::channel::mpsc::UnboundedSender<()>,
     refreshing: bool,
     refresh_again: bool,
+    /// Claude Code's `cleanupPeriodDays` for this project (sessions
+    /// untouched this long are deleted when Claude Code starts).
+    pub cleanup_days: u32,
+    /// The New Session button's menu (in a worktree, …).
+    pub new_menu: Entity<MenuState>,
     /// From the index (interactive filter applied).
     pub sessions: Vec<SessionInfo>,
     /// New sessions not on disk yet.
@@ -478,6 +483,8 @@ impl ProjectWindow {
             toast_task: None,
             context_menu,
             session_menus,
+            cleanup_days: 30,
+            new_menu: cx.new(MenuState::new),
             close_confirmed: false,
             unsaved_ok: false,
             pending_resume: resume,
@@ -487,6 +494,7 @@ impl ProjectWindow {
             _subscriptions: subscriptions,
         };
         this.refresh(cx);
+        this.load_cleanup_days(cx);
         if let Tab::Terminal(i) = this.tab {
             this.show_terminal(i, window, cx);
         }
@@ -541,6 +549,7 @@ impl ProjectWindow {
     ) {
         match event {
             ModelEvent::ClaudeDetected => {
+                self.load_cleanup_days(cx);
                 let config_dir = self.model.read(cx).config_dir();
                 if let Ok(mut index) = self.index.lock() {
                     index.set_config_dir(config_dir);
@@ -873,6 +882,32 @@ impl ProjectWindow {
             let view = w.view.upgrade()?;
             (view.entity_id() != me && view.read(cx).is_running(id)).then_some(w.project_id)
         })
+    }
+
+    /// Read `cleanupPeriodDays` off the UI thread.
+    pub fn load_cleanup_days(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let config_dir = self.model.read(cx).config_dir();
+        let task = cx.background_spawn(async move {
+            claude_env::cleanup_period_days(&config_dir, &project.main_folder)
+        });
+        cx.spawn(async move |this, cx| {
+            let days = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.cleanup_days != days {
+                    this.cleanup_days = days;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The most recently active session (for Continue on the start screen).
+    pub fn latest_session(&self) -> Option<&SessionInfo> {
+        self.sessions.iter().max_by_key(|s| s.last_activity)
     }
 
     /// Stop It and Open Here: end the other process, then resume here.

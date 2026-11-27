@@ -254,6 +254,26 @@ pub fn user_status_line(config_dir: &Path, project_dir: &Path) -> Option<String>
     })
 }
 
+/// Claude Code deletes sessions untouched for this many days at startup
+/// (`cleanupPeriodDays`; 30 when not set). Read with the same precedence as
+/// [`user_status_line`]. Only read.
+pub fn cleanup_period_days(config_dir: &Path, project_dir: &Path) -> u32 {
+    let files = [
+        project_dir.join(".claude").join("settings.local.json"),
+        project_dir.join(".claude").join("settings.json"),
+        config_dir.join("settings.json"),
+    ];
+    files
+        .iter()
+        .find_map(|file| {
+            let text = std::fs::read_to_string(file).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let days = value.get("cleanupPeriodDays")?.as_u64()?;
+            u32::try_from(days).ok()
+        })
+        .unwrap_or(30)
+}
+
 /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
 pub fn fallback_config_dir(env: &EnvMap) -> PathBuf {
     if let Some(dir) = env.get("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
@@ -441,6 +461,20 @@ mod tests {
             None
         );
         assert_eq!(parse_auth_status_config_dir(b"not json"), None);
+    }
+
+    #[test]
+    fn cleanup_period() -> Result<()> {
+        let t = tempfile::tempdir()?;
+        let (config, project) = (t.path().join("cfg"), t.path().join("p"));
+        std::fs::create_dir_all(project.join(".claude"))?;
+        std::fs::create_dir_all(&config)?;
+        assert_eq!(cleanup_period_days(&config, &project), 30);
+        std::fs::write(config.join("settings.json"), r#"{"cleanupPeriodDays": 90}"#)?;
+        assert_eq!(cleanup_period_days(&config, &project), 90);
+        std::fs::write(project.join(".claude").join("settings.json"), r#"{"cleanupPeriodDays": 7}"#)?;
+        assert_eq!(cleanup_period_days(&config, &project), 7);
+        Ok(())
     }
 
     #[test]

@@ -172,6 +172,104 @@ impl ProjectWindow {
         }
     }
 
+    /// The start screen, when no session, terminal or file is shown: the
+    /// ways to begin (new, continue the latest, in a worktree) and the
+    /// shortcuts worth knowing.
+    fn render_start(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let name = self.project_name(cx);
+        let latest = self
+            .latest_session()
+            .map(|s| (s.id.clone(), s.display_name.clone(), s.last_activity));
+        let git_repo = self.is_git_repo(cx);
+        let now = anveg_core::time::now_millis();
+        let shortcut = |keys: &'static str, what: &'static str| {
+            div()
+                .flex()
+                .gap_3()
+                .child(div().w(px(110.)).flex_shrink_0().text_color(c.foreground).child(keys))
+                .child(div().child(what))
+        };
+        div()
+            .id("start")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .child(
+                div()
+                    .w(px(340.))
+                    .max_w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_xl().text_color(c.foreground).truncate().child(name))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(c.muted_foreground)
+                            .pb_2()
+                            .child("Start a Claude Code session, or pick one on the left."),
+                    )
+                    .child(
+                        Button::new("main-new")
+                            .primary()
+                            .size(ButtonSize::Lg)
+                            .w_full()
+                            .icon(Icon::from(gpui_kit::assets::IconName::Plus))
+                            .label("New Session")
+                            .child(div().text_xs().opacity(0.7).child("⌘N"))
+                            .on_click(cx.listener(|this, _, window, cx| this.begin_new_session(false, window, cx))),
+                    )
+                    .children(latest.map(|(id, title, last)| {
+                        let label: String = title.chars().take(40).collect();
+                        let label = if title.chars().count() > 40 { format!("{label}…") } else { label };
+                        Button::new("main-continue")
+                            .outline()
+                            .size(ButtonSize::Lg)
+                            .w_full()
+                            .icon(Icon::from(gpui_kit::assets::IconName::Play))
+                            .label(format!("Continue “{label}”"))
+                            .tooltip(format!(
+                                "The latest session, active {}",
+                                anveg_core::time::relative(last, now)
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| this.click_session(&id, window, cx)))
+                    }))
+                    .when(git_repo, |el| {
+                        el.child(
+                            Button::new("main-worktree")
+                                .ghost()
+                                .size(ButtonSize::Lg)
+                                .w_full()
+                                .label("New Session in Worktree…")
+                                .child(div().text_xs().opacity(0.7).child("⇧⌘N"))
+                                .tooltip("Its own branch and folder, so it doesn't touch your working copy")
+                                .on_click(cx.listener(|this, _, window, cx| this.begin_new_session(true, window, cx))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .pt_6()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child(shortcut("⌘1 … ⌘9", "Open session 1 to 9"))
+                            .child(shortcut("⇧⌘[  ⇧⌘]", "Previous / next session"))
+                            .child(shortcut("⇧⌘T", "New terminal"))
+                            .child(shortcut("⌘P", "Open a file by name"))
+                            .child(shortcut("⌥⌘N", "Notes"))
+                            .child(shortcut("⌥⌘L", "Git and GitHub logs")),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_pane(
         &mut self,
         pane: Option<PaneView>,
@@ -180,24 +278,7 @@ impl ProjectWindow {
     ) -> AnyElement {
         let c = Colors::of(cx);
         let body: AnyElement = match pane {
-            None => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(c.muted_foreground)
-                .child("Select a session on the left, or start a new one.")
-                .child(
-                    Button::new("main-new")
-                        .primary()
-                        .label("New Session")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.begin_new_session(false, window, cx)
-                        })),
-                )
-                .into_any_element(),
+            None => self.render_start(cx),
             Some(PaneView::Session(id)) => self.render_session_pane(&id, is_split, cx),
             Some(PaneView::Terminal(i)) => self.render_terminal_pane(i, cx),
             Some(PaneView::Doc(i)) => match self.docs.get(i).and_then(|d| d.view.clone()) {

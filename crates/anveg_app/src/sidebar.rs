@@ -72,16 +72,6 @@ impl ProjectWindow {
                     )
                 })
                 .child(
-                    Button::new("new-session")
-                        .ghost()
-                        .size(ButtonSize::Sm)
-                        .icon(Icon::from(gpui_kit::assets::IconName::Plus))
-                        .tooltip("New Session (⌘N)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.begin_new_session(false, window, cx)
-                        })),
-                )
-                .child(
                     Button::new("project-settings")
                         .ghost()
                         .size(ButtonSize::Sm)
@@ -91,6 +81,50 @@ impl ProjectWindow {
                             this.begin_project_settings(window, cx)
                         })),
                 );
+
+        // The main action: big, first, with its shortcut; the menu beside it
+        // has the other ways to start one.
+        let weak = cx.entity().downgrade();
+        let git_repo = self.is_git_repo(cx);
+        let new_row = div()
+            .px_2()
+            .flex()
+            .gap_1()
+            .child(
+                Button::new("new-session")
+                    .primary()
+                    .size(ButtonSize::Lg)
+                    .flex_1()
+                    .icon(Icon::from(gpui_kit::assets::IconName::Plus))
+                    .label("New Session")
+                    .child(div().text_xs().opacity(0.7).child("⌘N"))
+                    .tooltip("Start a new Claude Code session in this project")
+                    .on_click(cx.listener(|this, _, window, cx| this.begin_new_session(false, window, cx))),
+            )
+            .child(
+                gpui_cn::DropdownMenu::new("new-session-more", &self.new_menu)
+                    .trigger(
+                        Button::new("new-session-more-trigger")
+                            .outline()
+                            .size(ButtonSize::Lg)
+                            .icon(Icon::from(gpui_kit::assets::IconName::ChevronDown))
+                            .tooltip("More ways to start a session"),
+                    )
+                    .items(move |_, _| {
+                        let w = weak.clone();
+                        vec![MenuEntry::Item(
+                            CnMenuItem::new("new-in-worktree", "New Session in Worktree…  ⇧⌘N")
+                                .description(if git_repo {
+                                    "Own branch and folder"
+                                } else {
+                                    "Needs a git repository"
+                                })
+                                .on_select(move |window, cx| {
+                                    let _ = w.update(cx, |this, cx| this.begin_new_session(true, window, cx));
+                                }),
+                        )]
+                    }),
+            );
 
         let list: AnyElement = if row_count == 0 {
             let filtering = !self.filter.read(cx).value().trim().is_empty();
@@ -142,17 +176,48 @@ impl ProjectWindow {
             .gap_1()
             .bg(c.sidebar)
             .child(header)
-            .child(div().px_2().child(Input::new(&self.filter).cleanable(true)))
+            .child(new_row)
+            .child(div().px_2().pt_1().child(Input::new(&self.filter).cleanable(true)))
             .child(div().flex_1().min_h_0().flex().flex_col().child(list))
-            .child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(c.muted_foreground)
-                    .child("Claude Code deletes sessions older than its cleanupPeriodDays (30 days by default)."),
-            )
+            .children(self.cleanup_note(cx))
             .into_any_element()
+    }
+
+    /// Days until Claude Code deletes a session last active at `last`
+    /// (when it next starts), if that is within a week.
+    fn days_left(&self, last: i64, now: i64) -> Option<i64> {
+        const DAY: i64 = 86_400_000;
+        let left = i64::from(self.cleanup_days) - (now - last) / DAY;
+        (left <= 7).then_some(left.max(0))
+    }
+
+    /// Only when sessions are close to Claude Code's cleanup: how many, and
+    /// why.
+    fn cleanup_note(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let c = Colors::of(cx);
+        let now = now_millis();
+        let soon = self
+            .sessions
+            .iter()
+            .filter(|s| self.days_left(s.last_activity, now).is_some())
+            .count();
+        (soon > 0).then(|| {
+            let days = self.cleanup_days;
+            div()
+                .mx_2()
+                .mb_1()
+                .p_2()
+                .rounded_md()
+                .bg(c.accent.opacity(0.5))
+                .text_xs()
+                .text_color(c.muted_foreground)
+                .child(format!(
+                    "{soon} session{} will soon be deleted by Claude Code: it removes sessions untouched for \
+                     {days} days (cleanupPeriodDays). Open one to keep it.",
+                    if soon == 1 { "" } else { "s" }
+                ))
+                .into_any_element()
+        })
     }
 
     fn render_rows(
@@ -162,6 +227,12 @@ impl ProjectWindow {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let c = Colors::of(cx);
+        // Amber, darker on light themes so it reads on white.
+        let warn = if cx.theme().is_dark() {
+            gpui_kit::hsla(0.12, 0.9, 0.55, 1.0)
+        } else {
+            gpui_kit::hsla(0.08, 0.9, 0.36, 1.0)
+        };
         let now = now_millis();
         let show_memory = self.model.read(cx).settings.show_memory;
         // No row tooltips over an open context menu.
@@ -281,12 +352,37 @@ impl ProjectWindow {
                                             })
                                             .child(s.display_name.clone()),
                                     )
-                                    .child(
+                                    .child({
+                                        // Its status in words while it runs, and a
+                                        // warning before Claude Code deletes it.
+                                        let state = running.then_some(match status {
+                                            Some(anveg_core::status::SessionStatus::Working) => "Working",
+                                            Some(anveg_core::status::SessionStatus::NeedsInput) => "Needs input",
+                                            _ => "Running",
+                                        });
+                                        let state_color = c.status(status).unwrap_or(c.muted_foreground);
+                                        let expiry = (!running)
+                                            .then(|| self.days_left(s.last_activity, now))
+                                            .flatten();
                                         div()
+                                            .flex()
+                                            .gap_1()
                                             .text_xs()
                                             .text_color(c.muted_foreground)
-                                            .child(relative(s.last_activity, now)),
-                                    ),
+                                            .children(state.map(|t| {
+                                                div().text_color(state_color).child(format!("{t} ·"))
+                                            }))
+                                            .child(relative(s.last_activity, now))
+                                            .children(expiry.map(|d| {
+                                                div()
+                                                    .text_color(warn)
+                                                    .child(match d {
+                                                        0 => "· deleted on next start".to_owned(),
+                                                        1 => "· deleted in 1 day".to_owned(),
+                                                        d => format!("· deleted in {d} days"),
+                                                    })
+                                            }))
+                                    }),
                             )
                             .when(!menu_open, |el| {
                                 el.tooltip(move |_, cx| {

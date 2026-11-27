@@ -1374,3 +1374,28 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] Uncheck a staged file and commit: it isn't in the commit and is still staged afterwards.
 - [ ] Uncheck a section header: all its rows uncheck; check it again: all check.
 - [ ] A pre-commit hook that fails: the commit fails with its output, and nothing is lost (the staged files are as before).
+
+**Follow-up (2026-11-27): a bigger New Session button; sessions UX.** The owner asked for a bigger New Session button and for the UX and usability to be improved.
+- **New Session** is now the first thing in the Sessions sidebar: a full-width primary button with its shortcut (⌘N). Beside it, a ⌄ menu offers New Session in Worktree… (⇧⌘N), and says when that needs a git repository. The small + by the project name is gone.
+- **Start screen.** With nothing shown on the right (no session, terminal or file), the main area offers:
+  - New Session;
+  - Continue "<latest session>" (the most recently active one, which it resumes);
+  - New Session in Worktree…, in a git repository;
+  - the shortcuts worth knowing (⌘1–9, ⇧⌘[ ], ⇧⌘T, ⌘P, ⌥⌘N, ⌥⌘L).
+- **Status in words.** A running session's row says Running, Working or Needs input before its time, in the status colour, so it no longer depends on the dot's colour alone.
+- **Cleanup warning only when it matters.** The permanent "Claude Code deletes sessions older than…" line is gone. Instead:
+  - the app reads the real `cleanupPeriodDays` (`claude_env::cleanup_period_days`, with the same precedence as the status line setting; 30 by default; only read, off the UI thread);
+  - sessions within a week of deletion show "· deleted in N days" in amber (darker on light themes);
+  - a note at the bottom says how many will soon go, and that opening one keeps it.
+
+**Verified (sandbox):** dark and light themes, with `cleanupPeriodDays` 10 in the test home.
+- The big New Session button and its menu.
+- The start screen with Continue "do the thing".
+- "· deleted in 7 days" on the 3-day-old sessions, and the note "5 sessions will soon be deleted".
+- "Running ·" on a resumed session.
+- Core test `cleanup_period`.
+
+**Manual checks (Mac)**
+- [ ] The New Session button and ⌄ menu in both themes; New Session in Worktree… asks for the worktree name.
+- [ ] Close every tab on the right: the start screen shows; Continue resumes the latest session.
+- [ ] A session waiting for permission shows "Needs input" in amber in the list.
