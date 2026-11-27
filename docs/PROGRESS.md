@@ -1149,3 +1149,47 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] In TinyTimer: Git ▸ Changes ▸ Ignored by .gitignore ▸ Show. Are your new files there? If so, + adds them. If they shouldn't be ignored, remove the rule from .gitignore and they appear under Untracked.
 - [ ] Files tab: right-click a new file ▸ Add to Git, then Git tab: it is under Staged; commit.
 - [ ] Right-click a folder with new files ▸ Add to Git: the toast counts them.
+
+## Git: Initialize, and folders that are repositories of their own (owner's request, 2026-11-27)
+
+**Problems.**
+- **A project folder that was never `git init`ed:** the Git tab said only "None of this project's folders is in a git repository." The only way out was Publish to GitHub, which also creates a GitHub repository.
+- **A folder with its own `.git` inside the project's repository** (someone ran `git init` in it, or cloned into it): git lists it as one entry, `Inner/`, never its files. Staging it failed ("does not have a commit checked out") or, if it had commits, quietly recorded only a link to it, so clones of the project get an empty folder. **Stage All and Commit** (and Publish's first commit) ran `git add -A`, which did the same. The app also didn't know the inner folder was a repository, so it couldn't be committed to from the Git tab.
+
+**Done: Initialize**
+- With no repository, the Git tab says "This project isn't a git repository yet." and offers two buttons:
+  - **Initialize and Commit All Files:** `git init` in the main folder, then a first commit of everything .gitignore doesn't ignore;
+  - **Initialize Only.**
+- It's local only, and the text says so and points to Publish to GitHub.
+- A failed first commit (no user.name or user.email) says the repository was still created.
+
+**Done: inner repositories**
+- **Discovered:** inside each project repository, untracked folders with their own `.git`, plus links already recorded (submodules, embedded repositories), up to three levels deep (`find_repos_with_inner`). They appear in the Git tab's repository picker, so they can be committed to. One created later (git init in a folder, a clone) is noticed at the next status refresh.
+- **Their row in the parent's Untracked list:** "R Inner/ — separate git repository", with **Open** (switch the panel to it) and **Include…**, instead of Stage and Discard (which would have moved the whole repository to the Trash).
+- **Include…** (and Files ▸ Add to Git ▸ Include) asks first. It forgets a recorded link (`git rm --cached -f`, index only), moves `Inner/.git` to the Trash (its own history can be put back), then the files show as new in the parent.
+- **Stage All, Stage All and Commit, and Publish's and Initialize's first commits** leave inner repositories out: `git add -A -- . ':(exclude)Inner'`. No error, and no silent link.
+- **Files ▸ right-click a folder that is an inner repository ▸ Add to Git** asks which you mean:
+  - **Add to Its Own Repository**;
+  - **Include in <outer>**: the inner `.git` goes to the Trash, then the files are added to the outer repository, with a toast counting them.
+  
+  A file inside an inner repository is added to the inner one, its own repository.
+
+**Tests:** in a real repository with a plain new folder, an inner repository without commits and one with a commit:
+- `Status::inner_repos`, and `find_repos_with_inner` finds both;
+- `stage_all` stages only the plain folder's file;
+- a link recorded by a plain `git add` is still found;
+- absorbing both makes their files untracked in the outer repository, and absorbing a plain folder is refused.
+
+**Verified under Xvfb (dark theme):**
+- The picker listed newproj and Inner. Open showed Inner's own branch and file.
+- Stage All in newproj staged Plain/ and src/ and left Inner/.
+- Include… asked, then moved Inner/.git to the Trash (its .trashinfo holds the original path), and Inner.swift appeared under Untracked. The picker dropped Inner.
+- A never-initialized project: the new screen; Initialize and Commit All Files made "Initial commit" with Sources/main.swift, and the tab switched to the normal view.
+- Files ▸ Add to Git on Lib/ (its own repository with a commit) asked with the three buttons. Include in newproj trashed Lib/.git and staged Lib/Lib.swift: "Added 1 file to git".
+
+**Manual checks (Mac)**
+- [ ] Open a folder that isn't a repository: Git tab ▸ Initialize and Commit All Files. `git log` shows the first commit, and nothing is created on GitHub.
+- [ ] In a project repository, `git init` a subfolder that has a file. Within a few seconds the Git tab lists "Sub/ separate git repository" and the picker shows Sub.
+- [ ] Stage All and Commit: Sub/ stays out (no error).
+- [ ] Include… on it: Sub/.git is in the Finder Trash, and Sub's files are under Untracked. Stage and commit them.
+- [ ] Files ▸ right-click such a folder ▸ Add to Git: the three-button question. Try both choices.

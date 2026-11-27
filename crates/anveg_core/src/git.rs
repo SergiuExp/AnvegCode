@@ -109,6 +109,73 @@ impl Git {
             .filter(|p| !p.as_os_str().is_empty())
     }
 
+    /// The repositories for a project's roots, then the repositories
+    /// inside them (a folder with its own `.git`), without duplicates.
+    pub fn find_repos_with_inner(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let mut out = self.find_repos(roots);
+        let mut i = 0;
+        // Breadth first, three levels deep at most.
+        let mut depth = vec![0usize; out.len()];
+        while i < out.len() {
+            if depth[i] < 3 {
+                for inner in self.inner_repos(&out[i]) {
+                    if !out.contains(&inner) {
+                        out.push(inner);
+                        depth.push(depth[i] + 1);
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Repositories inside `repo`: untracked folders with their own `.git`,
+    /// and ones already recorded as a link (submodules, embedded repos).
+    pub fn inner_repos(&self, repo: &Path) -> Vec<PathBuf> {
+        let mut rel: Vec<String> = self
+            .status(repo)
+            .map(|s| s.inner_repos().map(str::to_owned).collect())
+            .unwrap_or_default();
+        rel.extend(self.gitlinks(repo));
+        rel.into_iter()
+            .map(|r| repo.join(r))
+            .filter(|p| p.join(".git").exists())
+            .collect()
+    }
+
+    /// Paths recorded in the index as links to other repositories.
+    fn gitlinks(&self, repo: &Path) -> Vec<String> {
+        let Ok(out) = self.read_ok(repo, &["ls-files", "--stage", "-z"]) else {
+            return Vec::new();
+        };
+        out.split('\0')
+            .filter(|l| l.starts_with("160000 "))
+            .filter_map(|l| l.split_once('\t').map(|(_, p)| p.to_owned()))
+            .collect()
+    }
+
+    /// Make the inner repository at `rel` an ordinary folder of `repo`:
+    /// forget a recorded link to it, then `remove` its `.git` (the app
+    /// moves it to the Trash). Its files then show as new in `repo`.
+    pub fn absorb_inner_repo(
+        &self,
+        repo: &Path,
+        rel: &str,
+        remove: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
+        let rel = rel.trim_end_matches('/');
+        if self.gitlinks(repo).iter().any(|g| g == rel) {
+            // --cached: only the index entry goes; -f: even when staged.
+            self.write(repo, &["rm", "--cached", "-f", "-q", "--", rel])?;
+        }
+        let dot_git = repo.join(rel).join(".git");
+        if !dot_git.exists() {
+            anyhow::bail!("{} has no .git", repo.join(rel).display());
+        }
+        remove(&dot_git)
+    }
+
     /// The repositories for a project's roots, without duplicates.
     pub fn find_repos(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
@@ -281,8 +348,19 @@ impl Git {
         Ok(parse_ignored(&out.stdout, max))
     }
 
+    /// Stage every change and new file, except inner repositories (git
+    /// would refuse one without commits, or record only a link to it).
     pub fn stage_all(&self, repo: &Path) -> Result<()> {
-        self.write(repo, &["add", "-A"]).map(drop)
+        let inner: Vec<String> = self
+            .status(repo)
+            .map(|s| s.inner_repos().map(|p| format!(":(exclude){p}")).collect())
+            .unwrap_or_default();
+        let mut args = vec!["add", "-A"];
+        if !inner.is_empty() {
+            args.extend(["--", "."]);
+            args.extend(inner.iter().map(String::as_str));
+        }
+        self.write(repo, &args).map(drop)
     }
 
     pub fn unstage(&self, repo: &Path, paths: &[&str]) -> Result<()> {
@@ -828,6 +906,14 @@ pub struct StatusEntry {
     pub change: Change,
 }
 
+impl StatusEntry {
+    /// An untracked folder with its own `.git` (with every untracked file
+    /// listed, only such a folder ends in `/`).
+    pub fn is_inner_repo(&self) -> bool {
+        self.section == Section::Untracked && self.path.ends_with('/')
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub branch: BranchStatus,
@@ -837,6 +923,15 @@ pub struct Status {
 impl Status {
     pub fn section(&self, section: Section) -> impl Iterator<Item = &StatusEntry> {
         self.entries.iter().filter(move |e| e.section == section)
+    }
+
+    /// Untracked folders that are repositories of their own (git lists
+    /// such a folder as one entry ending in `/`, never its files), without
+    /// the `/`.
+    pub fn inner_repos(&self) -> impl Iterator<Item = &str> {
+        self.section(Section::Untracked)
+            .filter(|e| e.is_inner_repo())
+            .map(|e| e.path.trim_end_matches('/'))
     }
 
     pub fn has_staged(&self) -> bool {
@@ -1380,6 +1475,40 @@ mod tests {
         git.stage_force(&dir, &["debug.log"])?;
         let staged: Vec<String> = git.status(&dir)?.section(Section::Staged).map(|e| e.path.clone()).collect();
         assert_eq!(staged, ["debug.log", "src/new.rs", "src/other.rs"]);
+        Ok(())
+    }
+
+    #[test]
+    fn inner_repositories() -> Result<()> {
+        let (_t, dir) = repo()?;
+        let git = Git::default();
+        sh(
+            &dir,
+            "echo a > a.txt && git add a.txt && git commit -qm init \
+             && mkdir -p Plain Inner Done && echo x > Plain/f.swift \
+             && (cd Inner && git init -q && echo y > f.swift) \
+             && (cd Done && git init -q && echo z > g.swift && git add g.swift && git commit -qm d)",
+        )?;
+        let status = git.status(&dir)?;
+        assert_eq!(status.inner_repos().collect::<Vec<_>>(), ["Done", "Inner"]);
+        let found = git.find_repos_with_inner(std::slice::from_ref(&dir));
+        assert_eq!(found, [dir.clone(), dir.join("Done"), dir.join("Inner")]);
+        // Stage All leaves inner repositories out (no error, no link).
+        git.stage_all(&dir)?;
+        let staged: Vec<String> = git.status(&dir)?.section(Section::Staged).map(|e| e.path.clone()).collect();
+        assert_eq!(staged, ["Plain/f.swift"]);
+        // A link recorded anyway (plain git add) is still found...
+        sh(&dir, "git add Done 2>/dev/null")?;
+        assert_eq!(git.gitlinks(&dir), ["Done"]);
+        assert!(git.inner_repos(&dir).contains(&dir.join("Done")));
+        // ...and absorbing turns both into ordinary folders.
+        let rm = |p: &Path| std::fs::remove_dir_all(p).map_err(anyhow::Error::from);
+        git.absorb_inner_repo(&dir, "Done/", rm)?;
+        git.absorb_inner_repo(&dir, "Inner", rm)?;
+        assert!(git.gitlinks(&dir).is_empty() && git.inner_repos(&dir).is_empty());
+        let untracked: Vec<String> = git.status(&dir)?.section(Section::Untracked).map(|e| e.path.clone()).collect();
+        assert_eq!(untracked, ["Done/g.swift", "Inner/f.swift"]);
+        assert!(git.absorb_inner_repo(&dir, "Plain", rm).is_err());
         Ok(())
     }
 

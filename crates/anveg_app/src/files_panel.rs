@@ -377,9 +377,29 @@ impl FilesPanel {
     /// File ▸ Add to Git: stage the file, or a folder's new and changed
     /// files. An ignored path asks first, naming the rule.
     fn add_to_git(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // A folder with its own .git inside another repository: ask which.
+        if path.is_dir() && path.join(".git").exists() {
+            let outer = self
+                .store
+                .read(cx)
+                .repos
+                .iter()
+                .filter(|r| r.root != path && path.starts_with(&r.root))
+                .max_by_key(|r| r.root.as_os_str().len())
+                .map(|r| r.root.clone());
+            if let Some(outer) = outer {
+                self.ask_inner_repo(path, outer, cx);
+                return;
+            }
+        }
         let Some((root, rel)) = self.repo_of(&path, cx) else {
             return;
         };
+        self.add_in(root, rel, path, cx);
+    }
+
+    /// `git add -v` of `rel` in `root`, with a toast; an ignored path asks.
+    fn add_in(&mut self, root: PathBuf, rel: String, path: PathBuf, cx: &mut Context<Self>) {
         let git = model(cx).read(cx).git();
         let (r, p) = (root.clone(), rel.clone());
         let task = cx.background_spawn(async move {
@@ -408,6 +428,69 @@ impl FilesPanel {
                     "Could not add to git",
                     format!("{e:#}"),
                 ))),
+            });
+        }));
+    }
+
+    /// Add to Git on a repository inside another one.
+    fn ask_inner_repo(&mut self, path: PathBuf, outer: PathBuf, cx: &mut Context<Self>) {
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        let (inner_name, outer_name) = (name(&path), name(&outer));
+        let Ok(rel) = path.strip_prefix(&outer).map(|r| r.to_string_lossy().into_owned()) else {
+            return;
+        };
+        let weak = cx.entity().downgrade();
+        let weak2 = weak.clone();
+        let (p1, p2, o2, r2) = (path.clone(), path.clone(), outer.clone(), rel.clone());
+        let prompt = Prompt::new(
+            format!("{inner_name}/ is a separate git repository"),
+            format!(
+                "It has its own .git folder, so {outer_name} can't see its files. Add its new files to its \
+                 own repository, or include them in {outer_name}: that moves {inner_name}/.git to the Trash \
+                 (its own commits and branches go with it; you can put it back), then adds the files to \
+                 {outer_name}."
+            ),
+        )
+        .cancel()
+        .button("Add to Its Own Repository", ButtonStyle::Outline, move |_, _, cx| {
+            let path = p1.clone();
+            let _ = weak.update(cx, |this, cx| this.add_in(path.clone(), ".".into(), path, cx));
+            Ok(())
+        })
+        .button(format!("Include in {outer_name}"), ButtonStyle::Primary, move |_, _, cx| {
+            let (path, outer, rel) = (p2.clone(), o2.clone(), r2.clone());
+            let _ = weak2.update(cx, |this, cx| this.include_inner(outer, rel, path, cx));
+            Ok(())
+        });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    /// Move the inner repository's .git to the Trash, then add its files to
+    /// the outer repository.
+    fn include_inner(&mut self, outer: PathBuf, rel: String, path: PathBuf, cx: &mut Context<Self>) {
+        let git = model(cx).read(cx).git();
+        let (o, r) = (outer.clone(), rel.clone());
+        let task = cx.background_spawn(async move {
+            git.absorb_inner_repo(&o, &r, |dot_git| {
+                trash::delete(dot_git)
+                    .map_err(|e| anyhow::anyhow!("Could not move {} to the Trash: {e}", dot_git.display()))
+            })
+        });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.store.update(cx, |s, cx| s.rediscover(cx));
+                match result {
+                    Ok(()) => this.add_in(outer, rel, path, cx),
+                    Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                        "Could not include the repository",
+                        format!("{e:#}"),
+                    ))),
+                }
             });
         }));
     }

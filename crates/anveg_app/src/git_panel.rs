@@ -112,6 +112,17 @@ impl GitStore {
         cx.notify();
     }
 
+    /// The project's main folder (where Initialize creates a repository).
+    pub fn main_folder(&self, cx: &App) -> Option<PathBuf> {
+        self.roots(cx).into_iter().next()
+    }
+
+    /// Look for repositories again (one was created, or an inner one was
+    /// made part of its parent).
+    pub fn rediscover(&mut self, cx: &mut Context<Self>) {
+        self.discover(cx);
+    }
+
     fn roots(&self, cx: &App) -> Vec<PathBuf> {
         model(cx)
             .read(cx)
@@ -150,7 +161,7 @@ impl GitStore {
         let roots = self.roots(cx);
         let git = model(cx).read(cx).git();
         let task = cx.background_spawn(async move {
-            git.find_repos(&roots)
+            git.find_repos_with_inner(&roots)
                 .into_iter()
                 .map(|root| {
                     let git_dir = git.git_dir(&root).unwrap_or_else(|_| root.join(".git"));
@@ -278,6 +289,20 @@ impl GitStore {
                     repo.worktrees = worktrees;
                 }
                 cx.notify();
+                // A folder became a repository of its own (git init in
+                // it, a clone): list it too.
+                let unknown = this.repos.iter().any(|r| {
+                    r.status.as_ref().is_some_and(|s| {
+                        s.inner_repos().any(|p| {
+                            let path = r.root.join(p);
+                            path.join(".git").exists() && !this.repos.iter().any(|o| o.root == path)
+                        })
+                    })
+                });
+                if unknown {
+                    this.discover(cx);
+                    return;
+                }
                 if std::mem::take(&mut this.again) {
                     this.refresh(cx);
                 }
@@ -1400,7 +1425,12 @@ impl GitPanel {
             if entries.is_empty() {
                 continue;
             }
-            let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+            // Inner repositories are not staged with the rest (Include…).
+            let paths: Vec<String> = entries
+                .iter()
+                .filter(|e| !e.is_inner_repo())
+                .map(|e| e.path.clone())
+                .collect();
             let header_button = match section {
                 Section::Staged => Some(
                     Button::new(SharedString::from(format!("all-{label}")))
@@ -1411,7 +1441,7 @@ impl GitPanel {
                             this.unstage(paths.clone(), window, cx)
                         })),
                 ),
-                Section::Changes | Section::Untracked => Some(
+                Section::Changes | Section::Untracked if !paths.is_empty() => Some(
                     Button::new(SharedString::from(format!("all-{label}")))
                         .ghost()
                         .size(ButtonSize::Sm)
@@ -1420,7 +1450,7 @@ impl GitPanel {
                             this.stage(paths.clone(), window, cx)
                         })),
                 ),
-                Section::Conflicts => None,
+                Section::Changes | Section::Untracked | Section::Conflicts => None,
             };
             list = list.child(
                 div()
@@ -1495,6 +1525,169 @@ impl GitPanel {
             .into_any_element()
     }
 
+    // -----------------------------------------------------------------
+    // Repositories inside the repository, and none at all
+    // -----------------------------------------------------------------
+
+    /// An untracked folder with its own `.git`: git sees one entry, never
+    /// its files, so it gets Include… and Open instead of Stage.
+    fn render_inner_repo(&mut self, i: usize, entry: StatusEntry, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let rel = entry.path.trim_end_matches('/').to_owned();
+        let abs = self.repo_root(cx).map(|r| r.join(&rel));
+        let known = abs
+            .as_ref()
+            .is_some_and(|a| self.store.read(cx).repos.iter().any(|r| &r.root == a));
+        let id = SharedString::from(format!("inner-{i}"));
+        let (include, open) = (rel.clone(), abs.clone());
+        div()
+            .id(id.clone())
+            .h(px(26.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .hover(|el| el.bg(c.accent.opacity(0.5)))
+            .child(div().w(px(14.)).text_xs().text_color(c.muted_foreground).child("R"))
+            .child(div().text_sm().child(format!("{rel}/")))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child("separate git repository"),
+            )
+            .when(known, |el| {
+                el.child(
+                    Button::new(SharedString::from(format!("{id}-open")))
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .label("Open")
+                        .tooltip("Show this repository's own changes")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(path) = &open {
+                                this.select_repo_at(path, window, cx);
+                            }
+                        })),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("{id}-include")))
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .label("Include…")
+                    .tooltip("Make its files part of this repository")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.ask_include_inner(include.clone(), window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Switch the panel to the repository at `root`.
+    fn select_repo_at(&mut self, root: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.store.read(cx).repos.iter().position(|r| r.root == root) else {
+            return;
+        };
+        self.repo = i;
+        self.view = View::Changes;
+        self.load_view(window, cx);
+        if self.show_ignored {
+            self.ignored = None;
+            self.load_ignored(cx);
+        }
+        cx.notify();
+    }
+
+    fn ask_include_inner(&mut self, rel: String, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let outer = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        let weak = cx.entity().downgrade();
+        let prompt = Prompt::new(
+            format!("Include {rel}/ in {outer}?"),
+            format!(
+                "{rel}/ is a separate git repository (it has its own .git folder), so {outer} can't see its \
+                 files. Including it moves {rel}/.git to the Trash; its files then show here as new files to \
+                 add and commit. Its own commits and branches go with that .git folder; you can put it back \
+                 from the Trash."
+            ),
+        )
+        .cancel()
+        .button("Include Files", ButtonStyle::Primary, move |_, window, cx| {
+            let (root, rel) = (root.clone(), rel.clone());
+            let _ = weak.update(cx, |this, cx| this.include_inner(root, rel, window, cx));
+            Ok(())
+        });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn include_inner(&mut self, root: PathBuf, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let git = model(cx).read(cx).git();
+        self.busy = Some(format!("Including {rel}/…"));
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            git.absorb_inner_repo(&root, &rel, |dot_git| {
+                trash::delete(dot_git).map_err(|e| anyhow::anyhow!("Could not move {} to the Trash: {e}", dot_git.display()))
+            })
+        });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                if let Err(e) = result {
+                    this.report(e, cx);
+                }
+                // The inner repository is gone from the list.
+                this.store.update(cx, |s, cx| s.rediscover(cx));
+                this.after_change(window, cx);
+            });
+        }));
+    }
+
+    /// No repository yet: `git init` in the project's main folder, and
+    /// optionally a first commit of everything (not what .gitignore
+    /// ignores, nor inner repositories). Local only: nothing goes to GitHub.
+    fn initialize(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.store.read(cx).main_folder(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        self.busy = Some("Initializing…".into());
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            git.init(&folder)?;
+            if commit {
+                git.initial_commit(&folder, "Initial commit").map_err(|e| {
+                    anyhow::anyhow!(
+                        "The repository was created, but the first commit failed: {e:#}\n\
+                         (Is git's user.name and user.email set? Is the folder empty?)"
+                    )
+                })?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                if let Err(e) = result {
+                    this.report(e, cx);
+                }
+                this.store.update(cx, |s, cx| s.rediscover(cx));
+                this.after_change(window, cx);
+            });
+        }));
+    }
+
     fn render_entry(
         &mut self,
         section: Section,
@@ -1502,6 +1695,9 @@ impl GitPanel {
         entry: StatusEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if entry.is_inner_repo() {
+            return self.render_inner_repo(i, entry, cx);
+        }
         let c = Colors::of(cx);
         let (dir, name) = match entry.path.rsplit_once('/') {
             Some((d, n)) => (d.to_owned(), n.to_owned()),
@@ -2116,11 +2312,42 @@ impl Render for GitPanel {
                 .into_any_element();
         }
         if store.repos.is_empty() {
+            let folder = store
+                .main_folder(cx)
+                .map(|f| f.display().to_string())
+                .unwrap_or_default();
+            let busy = self.busy.is_some();
             return div()
+                .id("git-panel")
+                .track_focus(&self.focus)
                 .p_2()
+                .flex()
+                .flex_col()
+                .gap_2()
                 .text_sm()
                 .text_color(c.muted_foreground)
-                .child("None of this project's folders is in a git repository.")
+                .child("This project isn't a git repository yet.")
+                .child(div().text_xs().child(format!(
+                    "Initialize creates one in {folder} (a .git folder), on this computer only: nothing \
+                     goes to GitHub. Use File ▸ Publish to GitHub for that."
+                )))
+                .child(
+                    Button::new("git-init-commit")
+                        .primary()
+                        .label("Initialize and Commit All Files")
+                        .disabled(busy)
+                        .tooltip("git init, then a first commit of every file (not what .gitignore ignores)")
+                        .on_click(cx.listener(|this, _, window, cx| this.initialize(true, window, cx))),
+                )
+                .child(
+                    Button::new("git-init")
+                        .outline()
+                        .label("Initialize Only")
+                        .disabled(busy)
+                        .tooltip("git init; choose what to commit afterwards")
+                        .on_click(cx.listener(|this, _, window, cx| this.initialize(false, window, cx))),
+                )
+                .children(self.busy.clone().map(|b| div().text_xs().child(b)))
                 .into_any_element();
         }
         self.repo = self.repo.min(store.repos.len() - 1);
