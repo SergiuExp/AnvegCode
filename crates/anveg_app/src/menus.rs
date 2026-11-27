@@ -1,9 +1,9 @@
 //! The menu bar (build plan, section 6.9) and the Dock menu. Rebuilt when
 //! the recent projects or the open windows change.
 //!
-//! The open project windows are listed by the app itself, in the Window
-//! menu and the Dock menu, from the model's record of open windows; macOS's
-//! automatic window list leaves them out
+//! The open projects are listed by the app itself, in the Window menu and
+//! the Dock menu, grouped by app window; macOS's automatic window list
+//! leaves the app windows out
 //! (`platform::keep_project_windows_out_of_window_list`).
 
 use std::path::{Path, PathBuf};
@@ -35,20 +35,56 @@ pub fn window_labels(open: &[(Uuid, String, PathBuf)]) -> Vec<(Uuid, String)> {
         .collect()
 }
 
-/// Open project windows as menu items (each brings its window forward).
+/// Open projects as menu items (each shows its tab), in window and tab
+/// order, a separator between windows.
 fn open_window_items(cx: &App) -> Vec<MenuItem> {
     let m = model(cx).read(cx);
-    let open: Vec<(Uuid, String, PathBuf)> = m
-        .windows
+    let groups: Vec<Vec<Uuid>> = m
+        .app_windows
         .iter()
-        .filter_map(|w| {
-            let p = m.projects.get(w.project_id)?;
+        .filter_map(|w| w.view.upgrade())
+        .map(|w| w.read(cx).projects.iter().map(|p| p.read(cx).project_id).collect())
+        .collect();
+    let open: Vec<(Uuid, String, PathBuf)> = groups
+        .iter()
+        .flatten()
+        .filter_map(|id| {
+            let p = m.projects.get(*id)?;
             Some((p.id, p.name.clone(), p.main_folder.clone()))
         })
         .collect();
-    window_labels(&open)
-        .into_iter()
-        .map(|(id, label)| MenuItem::action(label, OpenRecent { project_id: id }))
+    let labels = window_labels(&open);
+    let mut items = Vec::new();
+    for group in groups {
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        items.extend(
+            labels
+                .iter()
+                .filter(|(id, _)| group.contains(id))
+                .map(|(id, label)| MenuItem::action(label.clone(), OpenRecent { project_id: *id })),
+        );
+    }
+    items
+}
+
+/// Window ▸ Move Project to Window ▸ <the other windows>: every window but
+/// the one in front.
+fn move_to_items(cx: &App) -> Vec<MenuItem> {
+    let m = model(cx).read(cx);
+    let front = cx
+        .active_window()
+        .and_then(|a| m.app_windows.iter().find(|w| w.handle == a))
+        .or_else(|| m.last_active_window.and_then(|id| m.app_window(id)))
+        .map(|w| w.id);
+    m.app_windows
+        .iter()
+        .filter(|w| Some(w.id) != front)
+        .filter_map(|w| {
+            let name = w.view.upgrade()?.read(cx).display_name(cx);
+            Some(MenuItem::action(name, MoveProjectToWindow { window: w.id }))
+        })
         .collect()
 }
 
@@ -95,6 +131,7 @@ pub fn install(cx: &App) {
             MenuItem::action("Project Settings…", ProjectSettings),
             MenuItem::action("Toolbar Commands…", EditToolbarCommands),
             MenuItem::action("Close Tab", CloseTab),
+            MenuItem::action("Close Project", CloseProject),
             MenuItem::action("Close Window", CloseWindow),
         ]),
         Menu::new("Edit").items([
@@ -135,7 +172,20 @@ pub fn install(cx: &App) {
             let mut items = vec![
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Show Next Project", NextProject),
+                MenuItem::action("Show Previous Project", PreviousProject),
+                MenuItem::separator(),
+                MenuItem::action("Move Project to New Window", MoveProjectToNewWindow),
             ];
+            let others = move_to_items(cx);
+            if !others.is_empty() {
+                items.push(MenuItem::submenu(
+                    Menu::new("Move Project to Window").items(others),
+                ));
+                items.push(MenuItem::action("Merge All Windows", MergeAllWindows));
+            }
+            items.push(MenuItem::action("Rename Window…", RenameWindow));
             let projects = open_window_items(cx);
             if !projects.is_empty() {
                 items.push(MenuItem::separator());

@@ -81,11 +81,12 @@ impl ProjectWindow {
     /// Tell the panels whether they are on screen: only visible panels
     /// watch files or run `git`/`gh` (next phases, 0.5).
     pub fn update_panel_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.sidebar_tab;
+        // A hidden project tab shows no panel.
+        let tab = self.shown.then_some(self.sidebar_tab);
         let active = window.is_window_active();
-        let files = tab == SidebarTab::Files;
-        let git = tab == SidebarTab::Git;
-        let github = tab == SidebarTab::GitHub;
+        let files = tab == Some(SidebarTab::Files);
+        let git = tab == Some(SidebarTab::Git);
+        let github = tab == Some(SidebarTab::GitHub);
         if let Some(p) = &self.files_panel {
             p.update(cx, |p, cx| p.set_visible(files, cx));
         }
@@ -430,8 +431,8 @@ impl ProjectWindow {
             this.unsaved_ok = true;
             if quit {
                 cx.defer(crate::request_quit);
-            } else if this.should_close(window, cx) {
-                window.remove_window();
+            } else {
+                this.close(window, cx);
             }
         };
         let proceed2 = proceed;

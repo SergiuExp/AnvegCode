@@ -483,12 +483,12 @@ impl ProjectWindow {
         .detach();
     }
 
-    fn remove_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let id = self.project_id;
         self.stop_all(cx);
         self.model
             .update(cx, |m, cx| m.update_projects(cx, |p| p.remove(id)));
-        window.remove_window();
+        cx.emit(crate::project_window::ProjectWindowEvent::Close);
     }
 
     fn render_right(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -539,10 +539,6 @@ impl Render for ProjectWindow {
         let dialog = self.render_dialog(window, cx);
         let toast = self.toast.clone();
         let sidebar_width = self.sidebar_width;
-        // Full screen: the window tabs run across the top, and the
-        // sidebar loses its empty title bar (no window controls there).
-        let window_tabs = self.render_window_tabs(window, cx);
-        let fullscreen = window_tabs.is_some();
 
         div()
             .id("project-window")
@@ -596,12 +592,6 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &ProjectSettings, window, cx| {
                 this.begin_project_settings(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
-                if this.should_close(window, cx) {
-                    window.remove_window();
-                }
-            }))
-            .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| this.toggle_notes(window, cx)))
             .on_action(cx.listener(|this, _: &PublishToGitHub, window, cx| {
@@ -649,7 +639,6 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &ShowGitHub, window, cx| {
                 this.show_sidebar_tab(anveg_core::config::SidebarTab::GitHub, window, cx)
             }))
-            .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(|this, _: &OpenSession1, w, cx| this.open_nth(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession2, w, cx| this.open_nth(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession3, w, cx| this.open_nth(2, w, cx)))
@@ -659,7 +648,6 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &OpenSession7, w, cx| this.open_nth(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession8, w, cx| this.open_nth(7, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession9, w, cx| this.open_nth(8, w, cx)))
-            .children(window_tabs)
             .child(
                 h_resizable("sidebar-split")
                     .with_state(&self.sidebar_state)
@@ -674,16 +662,10 @@ impl Render for ProjectWindow {
                                     .flex_col()
                                     .border_r_1()
                                     .border_color(c.border)
-                                    .map(|el| {
-                                        if fullscreen {
-                                            // No window buttons: the tabs go on
-                                            // one line with the right side's.
-                                            el.child(TitleBar::new().inset(false).child(sidebar_tabs))
-                                        } else {
-                                            // Room for the traffic lights.
-                                            el.child(TitleBar::new()).child(sidebar_tabs)
-                                        }
-                                    })
+                                    // The window buttons are in the project
+                                    // tabs row above: the sidebar's tabs go on
+                                    // one line with the right side's.
+                                    .child(TitleBar::new().inset(false).child(sidebar_tabs))
                                     .child(div().flex_1().min_h_0().child(sidebar)),
                             ),
                     )

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anveg_core::claude_env::{self, ClaudeInfo, EnvMap};
-use anveg_core::config::{AppState, ProjectStore, Settings, WindowState};
+use anveg_core::config::{AppState, AppWindowState, ProjectStore, Settings, WindowState};
 use anveg_core::fswatch::FsWatchService;
 use anveg_core::github_api::{self, GitHub, Secret, Transport, UreqTransport};
 use anveg_core::github_auth::{self, KeychainStore, Poll, TokenStore};
@@ -18,10 +18,12 @@ use anveg_core::status::{HookMessage, HookServer, hooks_settings};
 use anveg_term::TerminalSettings;
 use futures::StreamExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Global, Task, WeakEntity,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Task,
+    WeakEntity,
 };
 use uuid::Uuid;
 
+use crate::app_window::AppWindow;
 use crate::lsp_manager::LspManager;
 use crate::project_window::ProjectWindow;
 
@@ -50,7 +52,8 @@ pub enum ModelEvent {
     AttentionChanged,
     /// Signed in or out of GitHub (or the sign-in is still being checked).
     GitHubChanged,
-    /// A project window opened or closed (for the full-screen window tabs).
+    /// A project opened, closed or moved, or a window was renamed (for
+    /// the project tabs).
     WindowsChanged,
 }
 
@@ -102,11 +105,20 @@ fn keychain_service() -> &'static str {
     }
 }
 
-/// An open project window.
+/// An open project: a tab of an app window.
 pub struct OpenWindow {
     pub project_id: Uuid,
+    /// The app window it is in.
     pub handle: AnyWindowHandle,
     pub view: WeakEntity<ProjectWindow>,
+    pub host: WeakEntity<AppWindow>,
+}
+
+/// An open app window.
+pub struct OpenAppWindow {
+    pub id: Uuid,
+    pub handle: AnyWindowHandle,
+    pub view: WeakEntity<AppWindow>,
 }
 
 /// The hook server and the settings file that points Claude Code at
@@ -127,7 +139,13 @@ pub struct AppModel {
     pub claude: Option<ClaudeInfo>,
     /// The environment for child processes; `None` while capturing.
     pub child_env: Option<EnvMap>,
+    /// Open projects, in the order they opened.
     pub windows: Vec<OpenWindow>,
+    /// App windows, in the order they opened.
+    pub app_windows: Vec<OpenAppWindow>,
+    /// The app window last in front: projects opened from elsewhere (the
+    /// welcome window, the Dock) become its tabs.
+    pub last_active_window: Option<Uuid>,
     pub welcome: Option<AnyWindowHandle>,
     pub settings_window: Option<AnyWindowHandle>,
     /// The Open from GitHub window, if open.
@@ -181,6 +199,8 @@ impl AppModel {
             claude: None,
             child_env: None,
             windows: Vec::new(),
+            app_windows: Vec::new(),
+            last_active_window: None,
             welcome: None,
             settings_window: None,
             github_window: None,
@@ -623,18 +643,39 @@ impl AppModel {
         cx.defer(|cx| crate::menus::install(cx));
     }
 
-    /// A project window closed (by the user, not by quitting).
-    pub fn window_closed(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+    /// A project's view went away (closed or moved; not by quitting).
+    pub fn window_closed(&mut self, view: EntityId, cx: &mut Context<Self>) {
         if self.quitting {
             return;
         }
-        self.windows.retain(|w| w.project_id != project_id);
+        self.windows.retain(|w| w.view.entity_id() != view);
         self.save_state_now(cx);
         cx.emit(ModelEvent::WindowsChanged);
         cx.defer(|cx| crate::menus::install(cx));
         if self.windows.is_empty() {
             cx.defer(crate::welcome::open);
         }
+    }
+
+    pub fn register_app_window(&mut self, window: OpenAppWindow, cx: &mut Context<Self>) {
+        self.app_windows.push(window);
+        self.schedule_save(cx);
+    }
+
+    pub fn app_window_closed(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        self.app_windows.retain(|w| w.id != id);
+        if self.last_active_window == Some(id) {
+            self.last_active_window = None;
+        }
+        self.save_state_now(cx);
+        cx.defer(|cx| crate::menus::install(cx));
+    }
+
+    pub fn app_window(&self, id: Uuid) -> Option<&OpenAppWindow> {
+        self.app_windows.iter().find(|w| w.id == id)
     }
 
     /// Save `state.json` after 500 ms of quiet.
@@ -666,17 +707,28 @@ impl AppModel {
             .filter_map(|w| w.view.upgrade())
             .map(|view| view.read(cx).window_state(cx))
             .collect();
-        AppState { windows }
+        let app_windows: Vec<AppWindowState> = self
+            .app_windows
+            .iter()
+            .filter_map(|w| w.view.upgrade())
+            .map(|view| view.read(cx).window_state(cx))
+            .filter(|w| !w.projects.is_empty())
+            .collect();
+        AppState {
+            windows,
+            app_windows,
+        }
     }
 
-    /// Running Claude sessions across all windows: (window, session ids).
-    pub fn running_sessions(&self, cx: &App) -> Vec<(AnyWindowHandle, Vec<String>)> {
+    /// Running Claude sessions across all projects: (window, project,
+    /// session names).
+    pub fn running_sessions(&self, cx: &App) -> Vec<(AnyWindowHandle, Uuid, Vec<String>)> {
         self.windows
             .iter()
             .filter_map(|w| {
                 let view = w.view.upgrade()?;
                 let names = view.read(cx).running_session_names();
-                (!names.is_empty()).then_some((w.handle, names))
+                (!names.is_empty()).then_some((w.handle, w.project_id, names))
             })
             .collect()
     }

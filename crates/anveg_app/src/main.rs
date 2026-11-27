@@ -1,11 +1,12 @@
 //! Anveg Code: a lightweight desktop app for managing Claude Code sessions.
 //!
-//! One process for all windows. Each project gets a window with its
-//! sessions on the left and the selected session's real Claude Code UI on
-//! the right. See `docs/build-plan.md`.
+//! One process for all windows. Each project is a tab of an app window,
+//! with its sessions on the left and the selected session's real Claude
+//! Code UI on the right. See `docs/build-plan.md`.
 
 mod actions;
 mod activity_view;
+mod app_window;
 mod app_assets;
 mod component_theme;
 mod dialogs;
@@ -46,6 +47,7 @@ mod workspace_ui;
 use std::time::Instant;
 
 use gpui_kit::{App, AppContext as _, PromptLevel};
+use uuid::Uuid;
 
 use crate::actions::*;
 use crate::model::{AppModel, ModelHandle, model};
@@ -121,7 +123,7 @@ fn main() {
         }
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
-            windows = opened,
+            projects = opened,
             "first window opened"
         );
         cx.activate(true);
@@ -179,14 +181,14 @@ fn install_actions(cx: &mut App) {
 pub(crate) fn request_quit(cx: &mut App) {
     tracing::debug!("quit requested");
     let model = model(cx);
-    // Unsaved files first: ask in the window that has them.
+    // Unsaved files first: ask in the project that has them.
     let unsaved = model.read(cx).windows.iter().find_map(|w| {
         let view = w.view.upgrade()?;
-        view.read(cx).has_unsaved(cx).then_some((w.handle, view))
+        view.read(cx).has_unsaved(cx).then_some((w.handle, w.project_id, view))
     });
-    if let Some((handle, view)) = unsaved {
+    if let Some((handle, project_id, view)) = unsaved {
+        windows::show_project(project_id, cx);
         let _ = handle.update(cx, |_, window, cx| {
-            window.activate_window();
             view.update(cx, |v, cx| {
                 v.ask_unsaved(true, window, cx);
             });
@@ -199,21 +201,31 @@ pub(crate) fn request_quit(cx: &mut App) {
         model.update(cx, |m, cx| m.quit_now(cx));
         return;
     }
-    let names: Vec<String> = running.iter().flat_map(|(_, n)| n.clone()).collect();
-    let target = cx
-        .active_window()
-        .filter(|a| running.iter().any(|(h, _)| h == a))
-        .unwrap_or(running[0].0);
-    let view = model
-        .read(cx)
-        .windows
+    let names: Vec<String> = running.iter().flat_map(|(_, _, n)| n.clone()).collect();
+    // Ask in the window in front when it has some, in the project shown
+    // there when that one has some.
+    let active = cx.active_window();
+    let shown = |id: Uuid, cx: &App| {
+        model
+            .read(cx)
+            .window_for(id)
+            .and_then(|w| w.view.upgrade())
+            .is_some_and(|v| v.read(cx).shown)
+    };
+    let (_, project_id, _) = running
         .iter()
-        .find(|w| w.handle == target)
-        .map(|w| w.view.clone());
-    let _ = target.update(cx, |_, window, cx| {
-        window.activate_window();
-        if let Some(view) = view {
+        .find(|(h, id, _)| Some(*h) == active && shown(*id, cx))
+        .or_else(|| running.iter().find(|(h, _, _)| Some(*h) == active))
+        .unwrap_or(&running[0]);
+    let project_id = *project_id;
+    windows::show_project(project_id, cx);
+    let target = model
+        .read(cx)
+        .window_for(project_id)
+        .map(|w| (w.handle, w.view.clone()));
+    if let Some((handle, view)) = target {
+        let _ = handle.update(cx, |_, _, cx| {
             let _ = view.update(cx, |v, cx| v.ask_quit(names, cx));
-        }
-    });
+        });
+    }
 }

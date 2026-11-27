@@ -33,6 +33,7 @@ objc2-foundation = { workspace = true, features = ["NSBundle", "NSString", "NSEr
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-user-notifications = { workspace = true, features = ["block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger"] }
 block2.workspace = true
+raw-window-handle.workspace = true
 
 [lints]
 workspace = true

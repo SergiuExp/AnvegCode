@@ -1,5 +1,7 @@
 //! A project window: the session list on the left, the selected session's
 //! Claude Code terminal (or a shell) on the right (build plan, section 6).
+//! It is one tab of an app window (`app_window.rs`), which owns the window
+//! itself: its frame, title and closing.
 //!
 //! This file holds the state and the session lifecycle; `sidebar.rs`,
 //! `panes.rs` and `dialogs.rs` render it.
@@ -10,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anveg_core::claude_env;
-use anveg_core::config::{
-    PaneContent, Project, RightTab, SavedBounds, SidebarTab, WindowState,
-};
+use anveg_core::config::{PaneContent, Project, RightTab, SidebarTab, WindowState};
 use anveg_core::launcher::{self, ClaudeOptions, LaunchSpec, SessionStart};
 use anveg_core::session_index::{SessionIndex, SessionInfo, trash_session_files};
 use anveg_core::status::{self, SessionStatus, StatusEvent, TERMINAL_ID_ENV};
@@ -23,8 +23,8 @@ use futures::StreamExt as _;
 use gpui_cn::{InputEvent, InputState, MenuState};
 use gpui_kit::base::{ResizablePanelEvent, ResizableState};
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window, WindowBounds, px,
+    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window,
 };
 use uuid::Uuid;
 
@@ -156,6 +156,13 @@ pub enum DialogKind {
     },
 }
 
+/// What a project tells its app window.
+#[derive(Clone, Debug)]
+pub enum ProjectWindowEvent {
+    /// Close this tab: the user agreed (sessions are stopped already).
+    Close,
+}
+
 /// Dragging a session from the sidebar onto a pane (Phase 3).
 #[derive(Clone, Debug)]
 pub struct DraggedSession {
@@ -214,14 +221,13 @@ pub struct ProjectWindow {
     /// The right side's tab strip, to scroll the shown tab into view.
     pub tab_scroll: gpui_kit::ScrollHandle,
     pub saved_expanded: Vec<PathBuf>,
-    bounds: Option<SavedBounds>,
+    /// This project is the shown tab of its window. A hidden one draws
+    /// nothing, keeps its terminals hidden and runs no panels.
+    pub shown: bool,
     pub dialog: Option<DialogKind>,
     pub toast: Option<SharedString>,
     toast_task: Option<Task<()>>,
     pub context_menu: Entity<MenuState>,
-    /// The pointer is over the full-screen window buttons (they show their
-    /// glyphs, as macOS's do).
-    pub window_buttons_hovered: bool,
     /// The “⋯” menus of the session bars: main pane, split pane.
     pub session_menus: [Entity<MenuState>; 2],
     close_confirmed: bool,
@@ -234,11 +240,14 @@ pub struct ProjectWindow {
     _subscriptions: Vec<Subscription>,
 }
 
+impl EventEmitter<ProjectWindowEvent> for ProjectWindow {}
+
 impl ProjectWindow {
     pub fn new(
         project_id: Uuid,
         saved: Option<WindowState>,
         resume: Vec<String>,
+        shown: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -297,11 +306,10 @@ impl ProjectWindow {
                 }
             },
         ));
-        subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
-            this.bounds = Some(saved_bounds(window));
-            this.save_soon(cx);
-        }));
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !this.shown {
+                return;
+            }
             if window.is_window_active() {
                 this.restart_memory_sampling(cx);
                 this.window_focused(window, cx);
@@ -333,18 +341,12 @@ impl ProjectWindow {
             }
         };
 
-        // Closing the window: confirm, then stop everything.
-        let entity = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            entity
-                .update(cx, |this, cx| this.should_close(window, cx))
-                .unwrap_or(true)
-        });
-        cx.on_release(|this: &mut Self, cx| {
+        // Closed or moved away (the app window asks first, `should_close`).
+        let view_id = cx.entity_id();
+        cx.on_release(move |this: &mut Self, cx| {
             this.stop_all_released(cx);
-            let id = this.project_id;
             let model = this.model.clone();
-            cx.defer(move |cx| model.update(cx, |m, cx| m.window_closed(id, cx)));
+            cx.defer(move |cx| model.update(cx, |m, cx| m.window_closed(view_id, cx)));
         })
         .detach();
 
@@ -421,13 +423,12 @@ impl ProjectWindow {
             split_state,
             sidebar_width: saved.sidebar_width.clamp(180.0, 520.0),
             split_ratio: saved.split_ratio.clamp(0.2, 0.8),
-            bounds: Some(saved_bounds(window)),
+            shown,
             dialog: None,
             toast: None,
             toast_task: None,
             context_menu,
             session_menus,
-            window_buttons_hovered: false,
             close_confirmed: false,
             unsaved_ok: false,
             pending_resume: resume,
@@ -436,7 +437,6 @@ impl ProjectWindow {
             _tasks: vec![refresh_loop],
             _subscriptions: subscriptions,
         };
-        this.update_title(window, cx);
         this.refresh(cx);
         if let Tab::Terminal(i) = this.tab {
             this.show_terminal(i, window, cx);
@@ -483,17 +483,6 @@ impl ProjectWindow {
             .is_some_and(|p| p.main_folder.join(".git").exists())
     }
 
-    fn update_title(&self, window: &mut Window, cx: &App) {
-        let mut title = self.project_name(cx);
-        if crate::model::model(cx).read(cx).paths.is_sandbox() {
-            title.push_str(" (Dev)");
-        }
-        window.set_window_title(&title);
-        // Setting a title puts the window back in macOS's own window list
-        // (`changeWindowsItem`); the app lists project windows itself.
-        crate::platform::keep_project_windows_out_of_window_list();
-    }
-
     fn on_model_event(
         &mut self,
         _: &Entity<AppModel>,
@@ -527,14 +516,9 @@ impl ProjectWindow {
                 self.restart_memory_sampling(cx);
                 self.reschedule_all_idle(cx);
             }
-            ModelEvent::ProjectsChanged => {
-                self.update_title(window, cx);
-                cx.notify();
-            }
+            ModelEvent::ProjectsChanged => cx.notify(),
             ModelEvent::Hook(message) => self.on_hook(message, window, cx),
-            // The full-screen window tabs show other windows' names and
-            // whether they need input.
-            ModelEvent::AttentionChanged | ModelEvent::WindowsChanged => cx.notify(),
+            ModelEvent::AttentionChanged | ModelEvent::WindowsChanged => {}
             ModelEvent::GitHubChanged => cx.notify(),
         }
     }
@@ -1203,6 +1187,29 @@ impl ProjectWindow {
             .count()
     }
 
+    /// Resume these sessions (a project moved here from another window).
+    pub fn resume_sessions(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_resume.extend(ids);
+        self.try_pending_resume(window, cx);
+    }
+
+    /// Every terminal that has a program (Claude sessions and shells).
+    pub fn terminal_views(&self) -> Vec<Entity<TerminalView>> {
+        self.running
+            .values()
+            .map(|r| r.view.clone())
+            .chain(self.terminals.iter().filter_map(|t| t.view.clone()))
+            .collect()
+    }
+
+    /// Whether a shell tab is running a command.
+    pub fn has_busy_terminal(&self, cx: &App) -> bool {
+        self.terminals
+            .iter()
+            .filter_map(|t| t.view.as_ref())
+            .any(|v| v.read(cx).is_busy(cx))
+    }
+
     fn try_pending_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.read(cx).claude.is_none() || self.pending_resume.is_empty() {
             return;
@@ -1222,15 +1229,40 @@ impl ProjectWindow {
 
     /// Whether a session's terminal is on screen in this window.
     pub fn is_session_visible(&self, id: &str) -> bool {
-        (self.tab == Tab::Claude && self.selected.as_deref() == Some(id))
-            || self.split
-                == Some(PaneContent::Session {
-                    session_id: id.to_owned(),
-                })
+        self.shown
+            && ((self.tab == Tab::Claude && self.selected.as_deref() == Some(id))
+                || self.split
+                    == Some(PaneContent::Session {
+                        session_id: id.to_owned(),
+                    }))
     }
 
     fn is_terminal_visible(&self, index: usize) -> bool {
-        self.tab == Tab::Terminal(index) || self.split == Some(PaneContent::Terminal { index })
+        self.shown
+            && (self.tab == Tab::Terminal(index)
+                || self.split == Some(PaneContent::Terminal { index }))
+    }
+
+    /// The app window shows this tab, or another one.
+    pub fn set_shown(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let was = self.shown;
+        self.shown = shown;
+        if !shown {
+            // As switching to another window does.
+            for task in self.autosave_all(cx) {
+                task.detach();
+            }
+            self.memory_task = None;
+        }
+        self.show_current(window, cx);
+        if shown && window.is_window_active() {
+            self.restart_memory_sampling(cx);
+            if !was {
+                self.window_focused(window, cx);
+            }
+        } else {
+            self.update_panel_visibility(window, cx);
+        }
     }
 
     /// Never show the same thing in both panes: one terminal or session
@@ -1299,7 +1331,7 @@ impl ProjectWindow {
     }
 
     fn focus_main(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some() {
+        if self.dialog.is_some() || !self.shown {
             return;
         }
         let view = match self.tab {
@@ -1679,7 +1711,15 @@ impl ProjectWindow {
     // Closing (6.7)
     // -----------------------------------------------------------------
 
-    /// Whether the window may close now; when sessions are running (and
+    /// ⌘W: close this project once it agrees (`should_close`); its app
+    /// window takes the tab out.
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.should_close(window, cx) {
+            cx.emit(ProjectWindowEvent::Close);
+        }
+    }
+
+    /// Whether the project may close now; when sessions are running (and
     /// the setting is on) this shows the confirmation and says no.
     pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // Autosave: what can be saved is saved (even if closing stops).
@@ -1717,7 +1757,7 @@ impl ProjectWindow {
         cx.notify();
     }
 
-    pub fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn confirm_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(DialogKind::ConfirmClose { quit, dont_ask, .. }) = self.dialog.take() else {
             return;
         };
@@ -1734,7 +1774,7 @@ impl ProjectWindow {
         } else {
             self.close_confirmed = true;
             self.stop_all(cx);
-            window.remove_window();
+            cx.emit(ProjectWindowEvent::Close);
         }
     }
 
@@ -2040,7 +2080,8 @@ impl ProjectWindow {
         running.sort();
         WindowState {
             project_id: self.project_id,
-            bounds: self.bounds,
+            // The app window keeps the frame.
+            bounds: None,
             selected_session: self.selected.clone(),
             active_tab: match self.tab {
                 Tab::Claude => RightTab::Claude,
@@ -2096,7 +2137,7 @@ impl ProjectWindow {
     }
 
     /// Point the project at a moved folder (missing-folder banner).
-    pub fn locate_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn locate_folder(&mut self, folder: PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
         let canonical = match std::fs::canonicalize(&folder) {
             Ok(p) => p,
             Err(error) => {
@@ -2131,7 +2172,6 @@ impl ProjectWindow {
         };
         self.index = Arc::new(Mutex::new(SessionIndex::load(config_dir, canonical, file)));
         self.refresh(cx);
-        self.update_title(window, cx);
         cx.notify();
     }
 }
@@ -2147,20 +2187,4 @@ fn send_rename(view: Entity<TerminalView>, name: String, cx: &mut App) {
         view.update(cx, |v, cx| v.send_text("\r", cx));
     })
     .detach();
-}
-
-fn saved_bounds(window: &Window) -> SavedBounds {
-    let (bounds, maximized, fullscreen) = match window.window_bounds() {
-        WindowBounds::Windowed(b) => (b, false, false),
-        WindowBounds::Maximized(b) => (b, true, false),
-        WindowBounds::Fullscreen(b) => (b, false, true),
-    };
-    SavedBounds {
-        x: f32::from(bounds.origin.x),
-        y: f32::from(bounds.origin.y),
-        width: f32::from(bounds.size.width).max(px(400.).into()),
-        height: f32::from(bounds.size.height).max(px(300.).into()),
-        maximized,
-        fullscreen,
-    }
 }

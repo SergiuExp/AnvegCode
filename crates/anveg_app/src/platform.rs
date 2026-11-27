@@ -44,18 +44,12 @@ pub fn keep_project_windows_out_of_window_list() {
     imp::keep_out_of_window_list(crate::windows::TABBING_ID);
 }
 
-/// System Settings ▸ Desktop & Dock ▸ "Prefer tabs when opening documents".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub enum TabbingMode {
-    Always,
-    /// The default: new windows become tabs while the app is full screen.
-    InFullScreen,
-    Never,
-}
-
-pub fn tabbing_mode() -> TabbingMode {
-    imp::tabbing_mode()
+/// Mark an app window (one that holds project tabs) for the code above,
+/// and keep macOS from making it a tab of another window: the app draws
+/// its own tabs, and macOS's window tabs are off (System Settings ▸ Prefer
+/// tabs does not apply).
+pub fn mark_project_window(window: &gpui_kit::Window) {
+    imp::mark_project_window(window, crate::windows::TABBING_ID);
 }
 
 /// Post a notification. Clicking it focuses the project's window and
@@ -205,17 +199,31 @@ mod imp {
         center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 
-    /// `AppleWindowTabbingMode` in the global defaults: "always",
-    /// "fullscreen" (also when unset) or "manual".
-    pub fn tabbing_mode() -> super::TabbingMode {
-        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        let value = defaults
-            .stringForKey(&NSString::from_str("AppleWindowTabbingMode"))
-            .map(|s| s.to_string());
-        match value.as_deref() {
-            Some("always") => super::TabbingMode::Always,
-            Some("manual") => super::TabbingMode::Never,
-            _ => super::TabbingMode::InFullScreen,
+    /// Give the window the project tabbing identifier (how the code here
+    /// knows app windows) and disallow macOS window tabs for it.
+    pub fn mark_project_window(window: &gpui_kit::Window, project_tabbing_id: &str) {
+        use raw_window_handle::RawWindowHandle;
+        let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return;
+        };
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        // SAFETY: the window's live content view; plain AppKit messages,
+        // each result checked before use.
+        unsafe {
+            let Some(view) = view.as_ref() else {
+                return;
+            };
+            let window: *mut AnyObject = msg_send![view, window];
+            let Some(window) = window.as_ref() else {
+                return;
+            };
+            let id = NSString::from_str(project_tabbing_id);
+            let () = msg_send![window, setTabbingIdentifier: &*id];
+            // NSWindowTabbingModeDisallowed.
+            let () = msg_send![window, setTabbingMode: 2isize];
         }
     }
 
@@ -229,12 +237,19 @@ mod imp {
     /// identifier `project_tabbing_id`): other windows, such as the welcome
     /// window, have no such row and keep macOS's bar, so they can still
     /// leave full screen.
+    ///
+    /// A window that fails to enter full screen gets its title bar back
+    /// as it was. GPUI makes the title bar opaque as a window starts to
+    /// enter full screen (macOS 15.3+) and transparent again only as it
+    /// leaves, so after a failed attempt the opaque bar covered the
+    /// project tabs.
     pub fn hide_title_bar_in_full_screen(project_tabbing_id: &'static str) {
         let center = NSNotificationCenter::defaultCenter();
         let queue = NSOperationQueue::mainQueue();
         for (name, hidden) in [
             ("NSWindowDidEnterFullScreenNotification", true),
             ("NSWindowWillExitFullScreenNotification", false),
+            ("NSWindowDidFailToEnterFullScreenNotification", false),
         ] {
             let block = block2::RcBlock::new(move |n: NonNull<NSNotification>| {
                 // SAFETY: AppKit passes a live notification.
@@ -285,6 +300,10 @@ mod imp {
                 return;
             };
             let () = msg_send![container, setHidden: hidden];
+            if !hidden {
+                // The app draws its own title bar (`TitleBar`).
+                let () = msg_send![&*window, setTitlebarAppearsTransparent: objc2::runtime::Bool::YES];
+            }
         }
         tracing::debug!(hidden, "full-screen title bar");
     }
@@ -346,10 +365,7 @@ mod imp {
 
     pub fn keep_out_of_window_list(_project_tabbing_id: &str) {}
 
-    /// No native window tabs on other platforms.
-    pub fn tabbing_mode() -> super::TabbingMode {
-        super::TabbingMode::Never
-    }
+    pub fn mark_project_window(_window: &gpui_kit::Window, _project_tabbing_id: &str) {}
 
     pub fn notify(title: &str, body: &str, _identifier: &str) {
         tracing::info!(title, body, "notification");

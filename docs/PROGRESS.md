@@ -1193,3 +1193,46 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] Stage All and Commit: Sub/ stays out (no error).
 - [ ] Include… on it: Sub/.git is in the Finder Trash, and Sub's files are under Untracked. Stage and commit them.
 - [ ] Files ▸ right-click such a folder ▸ Add to Git: the three-button question. Try both choices.
+
+## One window with project tabs (owner's request, 2026-11-27)
+
+The owner found the installed app running three windows, each in its own full-screen space, while it should be one window with the open projects switchable by tabs. Asked for the app to draw its own project tabs, with the option of several windows (to group projects) and moving projects between them.
+
+**Cause of the three windows:** each project was its own macOS window, grouped by macOS's window tabs only in full screen. At launch the app reopened the first full-screen window and waited for it to be full screen before adding the others as its tabs, but it checked `NSWindowStyleMaskFullScreen`, which is set when the full-screen animation *starts*. The others were added mid-animation, and each ended in a full-screen space of its own.
+
+**Done**
+- **App windows** (`app_window.rs`): each holds project tabs; one window unless you make more. A project opened from anywhere (⌘O, Open Recent, the welcome window, the Dock, a notification) becomes a tab of the app window in front (or the one last in front). macOS's window tabs are off for these windows (`setTabbingMode: Disallowed`; GPUI turns automatic tabbing off when no tabbing identifier is given), so a window can't split.
+- **The tabs row** (`window_tabs.rs`) is at the top of every app window: the project's name, the folder in its tooltip, the amber dot when a session needs input, × to close the project, and + to open one. Windowed, the row is the title bar: macOS's window buttons sit at its left and dragging it moves the window. In full screen it starts with the drawn window buttons, as before. The window's name shows at the left when it has one, or when there are several windows.
+- **Moving:** right-click a tab ▸ Move to New Window, Move to Window ▸ <window>; or the Window menu: Move Project to New Window, Move Project to Window ▸, Merge All Windows. A project's views can't move: GPUI views belong to the window they were made in (the terminal's focus listeners, for one). So a moved project opens again in the other window from its saved state. Its running sessions restart there with `--resume` once their old processes have exited (up to 3 s), and continue their conversations. When something would be interrupted (running sessions, a command in a shell tab), the move asks first and names it. Unsaved files that autosave does not cover block the move with a message. Pending autosaves finish first.
+- **Names:** a window is named after its projects ("aiaiai, fairturn +1"), or what you give it (Window ▸ Rename Window…, or the tab's menu; empty goes back to the projects' names). The name is the window title (Mission Control, ⌘`), and is used in the Move to Window menus; a named window's projects show next to its name there.
+- **Shortcuts:** ⌘W closes the shown project (asking as before), ⌥⌘W closes the window (asking for each project in turn), ⌥⌘→ / ⌥⌘← show the next / previous project. File ▸ Close Project and Close Window; Window ▸ Show Next / Previous Project.
+- **Hidden tabs:** a project that is not the shown tab keeps its sessions running but its terminals hidden (no drawing), runs no panel refreshes, and counts as "not looking" for notifications, the finish chime and idle shutdown. Switching away autosaves its editors, as switching windows does.
+- **Menus:** the Window and Dock menus list the open projects grouped by window (separators between windows); choosing one shows its tab.
+- **state.json:** `app_windows` (each window's name, frame, project ids in tab order, shown tab) next to the per-project `windows` entries. A file from before this (no `app_windows`) reopens as **one window with all its projects**, at the first project's frame. Projects without a saved state, or no longer in the list, are skipped (`AppState::app_windows_to_restore`, with tests).
+- Removed: the launch-time wait for full screen and the macOS tab grouping (`platform::tabbing_mode`).
+
+**Verified on the Mac** (sandbox `ANVEG_HOME`, three projects, an old `state.json` with three windows): it opened one window titled "alpha, beta +1 (Dev)" with the tabs alpha, beta, gamma, the window buttons at the row's left, and the first project shown. The saved file then had one `app_windows` entry with the three projects. Relaunching with the second tab saved as shown opened beta. `cargo clippy` is clean and the tests pass, except `git::tests::hunk_staging_with_crlf_and_no_trailing_newline`, which already failed before this change.
+
+**Not verified:** the clicks (switching tabs, ×, the tab menu, moving, merging, renaming), full screen, and closing with running sessions. They need someone at the Mac.
+
+**Manual checks (Mac)**
+- [ ] Relaunch the installed app with the old three windows: one window, three tabs.
+- [ ] Click tabs; ⌥⌘→ / ⌥⌘←. The sidebar, terminals and Files/Git panels follow the shown project.
+- [ ] Open a project (⌘O, or + in the row) while a window is in front: it becomes a tab of that window.
+- [ ] Right-click a tab ▸ Move to New Window, with a running session: the question names it; after Move the project opens in a new window and the session resumes there.
+- [ ] Move to Window ▸ the first window, and Window ▸ Merge All Windows: back to one window.
+- [ ] Rename Window…: the title and the Move to Window menus use the name; clearing it goes back to the projects' names.
+- [ ] ⌘W with a running session asks, then closes that tab only. ⌥⌘W with two projects that have running sessions asks for each in turn.
+- [ ] Full screen: the row starts with the window buttons; Exit Full Screen works; the title bar does not slide down.
+- [ ] Quit and relaunch: the same windows, names, tab order and shown tabs.
+
+**Follow-up (2026-11-27): full screen forgotten, tabs not shown.** The owner moved a project into another window and saw the receiving window with only one tab, and a full-screen window came back windowed.
+- **Full screen at launch was flaky.** The windows opened with `WindowBounds::Fullscreen`, and GPUI asks for full screen as a window opens. With several windows opening while the app activates, macOS sometimes ignored it: 2 of 4 sandbox launches with a normal and a full-screen window. The app then saved the window as not full screen. Now windows open at their frames, and the saved full-screen ones are put in full screen one at a time once launch is done (`windows::enter_full_screen`). Each is brought forward and asked, checked after the animation, and asked again up to three times. Until then the window is still saved as full screen (`AppWindow::restore_fullscreen`). A window moved to a new window from a full-screen one goes the same way.
+- **Tabs covered.** On macOS 15.3+ GPUI makes the title bar opaque when a window starts to enter full screen, and transparent again only when it leaves. A window whose attempt failed kept an opaque title bar over the tabs row, which then looked empty (captured in the sandbox). The app now makes it transparent again, and shows the title bar again, on `NSWindowDidFailToEnterFullScreenNotification` (and as a window leaves full screen).
+- After a move, the receiving window is brought forward once the source window is done (it was asked before the tab left the source).
+- Debug builds: `ANVEG_FULLSCREEN_ROW=1` draws the full-screen tabs row in a normal window.
+
+**Verified (sandbox):** a normal window plus a full-screen one, three launches: the full-screen one came back full screen each time, and was saved so. Two full-screen windows plus a normal one, two launches: both full screen each time. Moving a project into a full-screen window (with a temporary hook, removed): the window kept full screen and had both projects.
+
+**Not verified:** whether macOS switches to the receiving window's full-screen space after a move made from a real click (with no click, the sandbox test stayed where it was).
+

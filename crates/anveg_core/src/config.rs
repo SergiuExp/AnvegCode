@@ -481,10 +481,15 @@ pub enum PaneContent {
     Doc { doc: DocKey },
 }
 
-/// One open project window.
+/// One open project: what its tab shows. (Before windows held several
+/// projects each project had its own window, hence the name.)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowState {
     pub project_id: Uuid,
+    /// The project's own window frame, from before windows held several
+    /// projects. Only read to restore such a file
+    /// ([`AppState::app_windows_to_restore`]); new files keep the frame in
+    /// [`AppWindowState::bounds`].
     #[serde(default)]
     pub bounds: Option<SavedBounds>,
     #[serde(default)]
@@ -562,11 +567,27 @@ impl WindowState {
     }
 }
 
+/// One app window: its frame, its name and its project tabs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppWindowState {
+    /// The name the user gave it; `None` names it after its projects.
+    pub name: Option<String>,
+    pub bounds: Option<SavedBounds>,
+    /// Its projects, in tab order.
+    pub projects: Vec<Uuid>,
+    /// The shown tab (`projects[active]`).
+    pub active: usize,
+}
+
 /// `state.json`: the windows to reopen on launch.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppState {
+    /// Every open project's state, whichever window it is in.
     pub windows: Vec<WindowState>,
+    /// The app windows and the projects in each.
+    pub app_windows: Vec<AppWindowState>,
 }
 
 impl AppState {
@@ -576,6 +597,60 @@ impl AppState {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         atomic::write_json(path, self)
+    }
+
+    /// A project's saved state.
+    pub fn project(&self, id: Uuid) -> Option<&WindowState> {
+        self.windows.iter().find(|w| w.project_id == id)
+    }
+
+    /// The app windows to reopen, each with at least one project that has
+    /// a saved state. A project in no window joins the first. A file from
+    /// before windows held several projects (no `app_windows`) gives one
+    /// window with every project, at the first project's frame.
+    pub fn app_windows_to_restore(&self) -> Vec<AppWindowState> {
+        let mut seen = Vec::new();
+        let mut out: Vec<AppWindowState> = Vec::new();
+        for w in &self.app_windows {
+            let before = w.projects.get(w.active).copied();
+            let projects: Vec<Uuid> = w
+                .projects
+                .iter()
+                .copied()
+                .filter(|id| self.project(*id).is_some() && !seen.contains(id))
+                .collect();
+            seen.extend(projects.iter().copied());
+            if projects.is_empty() {
+                continue;
+            }
+            let active = before
+                .and_then(|id| projects.iter().position(|p| *p == id))
+                .unwrap_or(0);
+            out.push(AppWindowState {
+                name: w.name.clone(),
+                bounds: w.bounds,
+                projects,
+                active,
+            });
+        }
+        let rest: Vec<Uuid> = self
+            .windows
+            .iter()
+            .map(|w| w.project_id)
+            .filter(|id| !seen.contains(id))
+            .collect();
+        if !rest.is_empty() {
+            match out.first_mut() {
+                Some(first) => first.projects.extend(rest),
+                None => out.push(AppWindowState {
+                    name: None,
+                    bounds: self.windows.iter().find_map(|w| w.bounds),
+                    projects: rest,
+                    active: 0,
+                }),
+            }
+        }
+        out
     }
 }
 
@@ -733,7 +808,15 @@ mod tests {
         ];
         w.active_tab = RightTab::Doc;
         w.active_doc = Some(1);
-        let state = AppState { windows: vec![w] };
+        let state = AppState {
+            app_windows: vec![AppWindowState {
+                name: Some("Mobile".into()),
+                bounds: w.bounds,
+                projects: vec![w.project_id],
+                active: 0,
+            }],
+            windows: vec![w],
+        };
         state.save(&path)?;
         assert_eq!(AppState::load(&path), state);
         Ok(())
@@ -750,5 +833,72 @@ mod tests {
         assert_eq!(state.windows[0].sidebar_width, 260.0);
         assert_eq!(state.windows[0].terminal_tabs, 1);
         Ok(())
+    }
+
+    #[test]
+    fn project_windows_from_before_tabs_become_one_window() {
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let frame = |x: f32| SavedBounds {
+            x,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            maximized: false,
+            fullscreen: true,
+        };
+        let mut wa = WindowState::new(a);
+        wa.bounds = Some(frame(1.0));
+        let mut wb = WindowState::new(b);
+        wb.bounds = Some(frame(2.0));
+        let state = AppState {
+            windows: vec![wa, wb, WindowState::new(c)],
+            app_windows: Vec::new(),
+        };
+        assert_eq!(
+            state.app_windows_to_restore(),
+            vec![AppWindowState {
+                name: None,
+                bounds: Some(frame(1.0)),
+                projects: vec![a, b, c],
+                active: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_to_restore_skip_projects_without_state() {
+        let (a, b, c, gone) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let state = AppState {
+            windows: vec![WindowState::new(a), WindowState::new(b), WindowState::new(c)],
+            app_windows: vec![
+                AppWindowState {
+                    name: None,
+                    bounds: None,
+                    projects: vec![gone, a],
+                    active: 1,
+                },
+                // Only projects without state: dropped.
+                AppWindowState {
+                    name: Some("Old".into()),
+                    bounds: None,
+                    projects: vec![gone],
+                    active: 0,
+                },
+                // `a` is already in the first window.
+                AppWindowState {
+                    name: Some("Two".into()),
+                    bounds: None,
+                    projects: vec![b, a],
+                    active: 7,
+                },
+            ],
+        };
+        let out = state.app_windows_to_restore();
+        assert_eq!(out.len(), 2);
+        // The shown tab follows its project; `c` was in no window, so it
+        // joins the first.
+        assert_eq!((out[0].projects.clone(), out[0].active), (vec![a, c], 0));
+        assert_eq!(out[1].name.as_deref(), Some("Two"));
+        assert_eq!((out[1].projects.clone(), out[1].active), (vec![b], 0));
     }
 }

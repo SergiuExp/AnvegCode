@@ -17,6 +17,7 @@ actions!(
         NewSession,
         NewSessionInWorktree,
         NewTerminal,
+        CloseProject,
         CloseWindow,
         Minimize,
         Zoom,
@@ -61,6 +62,12 @@ actions!(
         ToggleNotes,
         // Toolbar commands
         EditToolbarCommands,
+        // Project tabs and windows
+        NextProject,
+        PreviousProject,
+        MoveProjectToNewWindow,
+        MergeAllWindows,
+        RenameWindow,
     ]
 );
 
@@ -69,6 +76,14 @@ actions!(
 #[action(namespace = anveg, no_json)]
 pub struct OpenRecent {
     pub project_id: Uuid,
+}
+
+/// Window ▸ Move Project to Window ▸ <window>: move the shown project to
+/// the app window with this id.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = anveg, no_json)]
+pub struct MoveProjectToWindow {
+    pub window: Uuid,
 }
 
 /// A toolbar command's shortcut: the window runs its project's command
@@ -93,7 +108,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("cmd-shift-t", NewTerminal, None),
         KeyBinding::new("cmd-shift-n", NewSessionInWorktree, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-w", CloseProject, None),
+        KeyBinding::new("cmd-alt-w", CloseWindow, None),
+        KeyBinding::new("cmd-alt-right", NextProject, None),
+        KeyBinding::new("cmd-alt-left", PreviousProject, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("cmd-t", ToggleTab, None),
         KeyBinding::new("cmd-shift-]", NextSession, None),
