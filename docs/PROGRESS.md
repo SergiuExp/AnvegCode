@@ -1236,3 +1236,10 @@ The owner found the installed app running three windows, each in its own full-sc
 
 **Not verified:** whether macOS switches to the receiving window's full-screen space after a move made from a real click (with no click, the sandbox test stayed where it was).
 
+**Follow-up (2026-11-27): tab look, Open Recent.**
+- Inactive project tabs are outlined and lightly filled, so they read as tabs; the shown one keeps the content's background and the blue top edge. Checked in dark and light mode (sandbox captures).
+- **Open Recent opened a new window.** It is a global action, which runs while GPUI is still handling the menu event in the window it came from; that window can't be updated then, so adding the tab failed and the app opened a new window. The Window menu's project items (the same action) could open a second copy of a project the same way. The action now runs deferred, as Quit does, and a fallback to a new window is logged as a warning.
+
+**Manual check (Mac)**
+- [ ] File ▸ Open Recent ▸ a project that isn't open: it becomes a tab of the window in front. Window ▸ an open project shows its tab.
+

@@ -138,8 +138,11 @@ fn install_actions(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| settings_window::open(cx));
     cx.on_action(|_: &OpenFromGitHub, cx| open_github::open(cx));
     cx.on_action(|_: &PublishFolderToGitHub, cx| windows::prompt_publish_folder(cx));
+    // Deferred too: it adds a tab to (or shows) the window the menu was
+    // used in, which can't be updated until the menu event is done.
     cx.on_action(|action: &OpenRecent, cx| {
-        windows::open_project(action.project_id, None, Vec::new(), cx)
+        let project_id = action.project_id;
+        cx.defer(move |cx| windows::open_project(project_id, None, Vec::new(), cx));
     });
     cx.on_action(|_: &ClearRecent, cx| {
         let model = model(cx);

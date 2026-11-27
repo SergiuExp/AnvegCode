@@ -61,6 +61,11 @@ pub fn open_project(
         });
     }
     if let Some(p) = p {
+        if !model.read(cx).app_windows.is_empty() {
+            // The front window is busy (an update of it is running): call
+            // this outside of one, e.g. from `cx.defer`.
+            tracing::warn!(%project_id, "could not add the tab to the front window; opening a new window");
+        }
         open_window(None, None, vec![p], 0, cx);
     }
     crate::welcome::close(cx);

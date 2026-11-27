@@ -185,7 +185,7 @@ impl AppWindow {
             .min_w_0()
             .flex()
             .items_end()
-            .gap_0p5()
+            .gap_1()
             .overflow_x_scroll();
         if self.name.is_some() || several_windows {
             tabs = tabs.child(
@@ -236,11 +236,14 @@ impl AppWindow {
                         .border_color(c.selected_bar)
                         .text_color(c.foreground)
                 })
+                // Outlined and lightly filled, so they read as tabs; the
+                // shown one takes the content's background and joins it.
                 .when(!current, |el| {
-                    el.border_color(gpui_kit::transparent_black())
+                    el.bg(c.accent.opacity(0.45))
+                        .border_color(c.border)
                         .text_color(c.muted_foreground)
                         .cursor_pointer()
-                        .hover(|s| s.bg(c.accent))
+                        .hover(|s| s.bg(c.accent).text_color(c.foreground))
                 })
                 .when(!menu_open, |el| {
                     el.tooltip(move |_, cx| crate::ui::LinesTooltip::build(vec![path.clone()], cx))
