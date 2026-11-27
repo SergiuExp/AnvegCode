@@ -5,7 +5,7 @@ use gpui_cn::prelude::*;
 use gpui_cn::{Dialog, Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Window, div,
+    ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
 
 use crate::project_window::{DialogKind, ProjectWindow};
@@ -334,25 +334,142 @@ impl ProjectWindow {
                     )
                     .into_any_element()
             }
-            DialogKind::OpenElsewhere { session_id } => {
+            DialogKind::OpenElsewhere {
+                session_id,
+                other,
+                stopping,
+                error,
+            } => {
+                use anveg_core::procinfo::Host;
                 let id = session_id.clone();
+                let stopping = *stopping;
+                let busy = other.status.as_deref() == Some("busy");
+                let background = other.kind.as_deref() == Some("background");
+                let (where_, hint) = match &other.host {
+                    Some(Host::App(app)) => (
+                        format!("Claude Code is running it in {app}."),
+                        format!("Look for a window or tab in {app} running Claude Code, and quit it there (/exit)."),
+                    ),
+                    Some(Host::Program(program)) => (
+                        format!("Claude Code is running it under {program}, with no app window around it."),
+                        format!("Look where you run {program}."),
+                    ),
+                    Some(Host::ThisApp) if other.shown_in.is_some() => (
+                        "It is running in another project tab of this app.".to_owned(),
+                        "Show It goes there.".to_owned(),
+                    ),
+                    Some(Host::ThisApp) => (
+                        "This app started it, but no tab shows it: a process left over from earlier."
+                            .to_owned(),
+                        "Nothing will be lost if you stop it: the conversation is saved as it goes."
+                            .to_owned(),
+                    ),
+                    Some(Host::Detached) => (
+                        "It is running with no app or window around it.".to_owned(),
+                        "It was started in the background, or the window it ran in was closed and it kept running."
+                            .to_owned(),
+                    ),
+                    None => (
+                        "Claude Code reports it as running, but not in which process.".to_owned(),
+                        "Quit Claude Code wherever it runs, then open the session again.".to_owned(),
+                    ),
+                };
+                let mut details: Vec<(&str, String)> = Vec::new();
+                if let Some(folder) = &other.folder {
+                    details.push(("Folder", crate::ui::tilde(folder)));
+                }
+                let status = match other.status.as_deref() {
+                    Some("busy") => Some("Working".to_owned()),
+                    Some("idle") => Some("Waiting for input".to_owned()),
+                    Some(other) => Some(other.to_owned()),
+                    None => None,
+                };
+                if let Some(status) = status {
+                    let status = if background {
+                        format!("{status} (a background agent)")
+                    } else {
+                        status
+                    };
+                    details.push(("Status", status));
+                }
+                if let Some(at) = other.started_at {
+                    details.push((
+                        "Started",
+                        anveg_core::time::relative(at, anveg_core::time::now_millis()),
+                    ));
+                }
+                if let Some(pid) = other.pid {
+                    details.push(("Process", pid.to_string()));
+                }
+                let grid = div().flex().flex_col().gap_1().text_sm().children(details.into_iter().map(
+                    |(k, v)| {
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(div().w(px(64.)).flex_shrink_0().text_color(c.muted_foreground).child(k))
+                            .child(div().flex_1().min_w_0().truncate().child(v))
+                    },
+                ));
+                let shown_in = other.shown_in;
+                let can_stop = other.pid.is_some() && shown_in.is_none();
                 Dialog::new("dlg-elsewhere")
                     .open(true)
                     .on_open_change(on_open_change)
                     .title("This session is open somewhere else")
-                    .description(
-                        "Opening it here too would mix both conversations into one transcript. \
-                         You can open a copy (a fork) instead.",
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .text_sm()
+                            .child(div().child(where_))
+                            .child(grid)
+                            .child(div().text_color(c.muted_foreground).child(hint))
+                            .child(div().text_color(c.muted_foreground).child(
+                                "Opening it here as well would mix both conversations into one transcript. \
+                                 You can stop the other one first, or open a copy (a fork).",
+                            ))
+                            .when(busy && can_stop, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(c.destructive)
+                                        .child("It is working right now: stopping it interrupts that."),
+                                )
+                            })
+                            .children(error.clone().map(|e| div().text_color(c.destructive).child(e))),
                     )
                     .footer(
                         div()
                             .flex()
                             .gap_2()
                             .child(Button::new("dlg-else-cancel").outline().label("Cancel").on_click(close))
+                            .when(can_stop, |el| {
+                                el.child(
+                                    Button::new("dlg-else-stop")
+                                        .outline()
+                                        .label(if stopping { "Stopping…" } else { "Stop It and Open Here" })
+                                        .disabled(stopping)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.stop_elsewhere_and_open(window, cx)
+                                        })),
+                                )
+                            })
+                            .when_some(shown_in, |el, project| {
+                                let id = id.clone();
+                                el.child(Button::new("dlg-else-show").outline().label("Show It").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.dialog = None;
+                                        let id = id.clone();
+                                        cx.defer(move |cx| crate::windows::reveal_session(project, id, cx));
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
                             .child(
                                 Button::new("dlg-else-fork")
                                     .primary()
                                     .label("Open a Copy (Fork)")
+                                    .disabled(stopping)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.dialog = None;
                                         this.fork_session(&id, window, cx);

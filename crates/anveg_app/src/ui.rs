@@ -98,3 +98,13 @@ impl Render for LinesTooltip {
             )
     }
 }
+
+/// A path for display, with the home folder as `~`.
+pub fn tilde(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}

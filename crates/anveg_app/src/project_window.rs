@@ -117,6 +117,22 @@ pub enum Row {
 }
 
 /// A modal dialog in the window.
+/// The other process that has a session open, for the "open somewhere
+/// else" dialog: what `claude agents` says about it, and what it runs in.
+#[derive(Clone, Debug)]
+pub struct Elsewhere {
+    pub pid: Option<u32>,
+    pub host: Option<anveg_core::procinfo::Host>,
+    pub folder: Option<PathBuf>,
+    /// `claude agents` status: "busy" (working) or "idle".
+    pub status: Option<String>,
+    /// "interactive" or "background".
+    pub kind: Option<String>,
+    pub started_at: Option<i64>,
+    /// Another tab of this app that runs it (its project).
+    pub shown_in: Option<Uuid>,
+}
+
 pub enum DialogKind {
     /// New Session in Worktree…: asks only for the worktree's name.
     NewWorktreeSession {
@@ -139,6 +155,10 @@ pub enum DialogKind {
     },
     OpenElsewhere {
         session_id: String,
+        other: Elsewhere,
+        /// Stop It and Open Here is waiting for the process to end.
+        stopping: bool,
+        error: Option<SharedString>,
     },
     ProjectSettings {
         name: Entity<InputState>,
@@ -768,25 +788,111 @@ impl ProjectWindow {
         let task = cx.background_spawn({
             let id = id.clone();
             async move {
-                match anveg_core::claude_env::claude_agents(&claude, &env) {
-                    Ok(agents) => agents.iter().any(|a| a.session_id == id),
+                let agents = match anveg_core::claude_env::claude_agents(&claude, &env) {
+                    Ok(agents) => agents,
                     Err(error) => {
                         tracing::info!(%error, "could not check for other processes; resuming");
-                        false
+                        return None;
                     }
-                }
+                };
+                let agent = agents.into_iter().find(|a| a.session_id == id)?;
+                let host = match agent.pid {
+                    // Listed, but the process has ended: nothing to clash with.
+                    Some(pid) => Some(anveg_core::procinfo::host_of(pid)?),
+                    None => None,
+                };
+                tracing::info!(pid = ?agent.pid, ?host, "session is open in another process");
+                Some(Elsewhere {
+                    pid: agent.pid,
+                    host,
+                    folder: agent.cwd,
+                    status: agent.status,
+                    kind: agent.kind,
+                    started_at: agent.started_at,
+                    shown_in: None,
+                })
             }
         });
         cx.spawn_in(window, async move |this, cx| {
             let elsewhere = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.starting.remove(&id);
-                if elsewhere {
-                    this.dialog = Some(DialogKind::OpenElsewhere { session_id: id });
-                    cx.notify();
-                } else {
-                    this.resume(id, window, cx);
+                match elsewhere {
+                    Some(mut other) => {
+                        if other.host == Some(anveg_core::procinfo::Host::ThisApp) {
+                            other.shown_in = this.tab_running(&id, cx);
+                        }
+                        this.dialog = Some(DialogKind::OpenElsewhere {
+                            session_id: id,
+                            other,
+                            stopping: false,
+                            error: None,
+                        });
+                        cx.notify();
+                    }
+                    None => this.resume(id, window, cx),
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Another project tab of this app with `id` running: its project.
+    fn tab_running(&self, id: &str, cx: &Context<Self>) -> Option<Uuid> {
+        let me = cx.entity_id();
+        crate::model::model(cx).read(cx).windows.iter().find_map(|w| {
+            let view = w.view.upgrade()?;
+            (view.entity_id() != me && view.read(cx).is_running(id)).then_some(w.project_id)
+        })
+    }
+
+    /// Stop It and Open Here: end the other process, then resume here.
+    pub fn stop_elsewhere_and_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(DialogKind::OpenElsewhere {
+            session_id,
+            other,
+            stopping,
+            error,
+        }) = &mut self.dialog
+        else {
+            return;
+        };
+        let Some(pid) = other.pid else {
+            return;
+        };
+        if *stopping {
+            return;
+        }
+        *stopping = true;
+        *error = None;
+        let id = session_id.clone();
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            anveg_core::procinfo::stop_process(pid, Duration::from_secs(5))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        tracing::info!(pid, "stopped the other process; resuming here");
+                        this.dialog = None;
+                        this.resume(id, window, cx);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not stop the other process");
+                        if let Some(DialogKind::OpenElsewhere { stopping, error, .. }) = &mut this.dialog {
+                            *stopping = false;
+                            *error = Some(
+                                format!(
+                                    "It didn't stop within 5 seconds (process {pid}). Quit it where it runs, or try again."
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();

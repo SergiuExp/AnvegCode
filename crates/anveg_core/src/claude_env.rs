@@ -282,6 +282,9 @@ pub struct AgentInfo {
     pub status: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// When it started, in Unix milliseconds.
+    #[serde(default)]
+    pub started_at: Option<i64>,
 }
 
 /// Parse `claude agents --json` output.
@@ -460,6 +463,7 @@ mod tests {
         assert_eq!(agents[0].pid, Some(101));
         assert_eq!(agents[0].kind.as_deref(), Some("interactive"));
         assert_eq!(agents[0].status.as_deref(), Some("busy"));
+        assert_eq!(agents[0].started_at, Some(1_795_459_769_543));
         Ok(())
     }
 }

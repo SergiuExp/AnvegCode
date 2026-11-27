@@ -182,7 +182,7 @@ Other notable crates: `ignore` 0.4 (ignore rules in the Files tab and quick open
 **Done**
 - **New** (⌘N, or `+`): an optional name; runs `claude --session-id <uuid> [--name …] [--add-dir …] [--settings <hooks>] [default flags]` in the main folder. The row appears at once, before the transcript exists. A new session that exits before writing anything disappears from the list.
 - **Resume** by clicking a row: `claude --resume <id> --add-dir … --settings …`. The extra folders and the hooks are passed again every time, because Claude Code doesn't restore them.
-- **Duplicate guard:** before resuming, `claude agents --json` runs once. If the session is open elsewhere, a dialog offers **Open a Copy (Fork)** or Cancel. If `claude agents` fails, the check is skipped.
+- **Duplicate guard:** before resuming, `claude agents --json` runs once. If the session is open elsewhere, a dialog offers **Open a Copy (Fork)** or Cancel (later: it says where, and offers Stop It and Open Here; see below). If `claude agents` fails, the check is skipped.
 - **Several sessions at once:** switching is instant; hidden terminals keep parsing but are not drawn.
 - **When `claude` exits:** the last screen stays, dimmed, with **Session ended** (and the exit code when non-zero) and **Resume**. A selected session that isn't running shows "This session is not running" with **Resume**.
 - **Shortcuts:** ⌘1–⌘9 open the nth session; ⌘⇧] / ⌘⇧[ step through them.
@@ -1253,3 +1253,21 @@ The owner found the installed app running three windows, each in its own full-sc
 
 **Manual check (Mac)**
 - [ ] Dark mode, two projects in a window and a second window open: the inactive tab is easy to see and doesn't blend with the window's name; hovering it brightens it. Same in light mode.
+
+**Follow-up (2026-11-27): "open somewhere else" says where.** The owner got "This session is open somewhere else" with no way to tell where. The dialog now shows:
+- **What the process runs in.** The app walks up the process's parents (`procinfo::host_of`, with `sysinfo`), skipping shells and runtimes (zsh, bash, node, …):
+  - a macOS app: the outermost `Name.app` in a parent's path, such as Terminal, iTerm or Visual Studio Code;
+  - another program, such as tmux or sshd;
+  - this app, as a process left over from earlier, or another project tab of this app (then **Show It** goes there);
+  - nothing ("no app or window around it": started in the background, or its window was closed and it kept running).
+- **Details:** folder, status (Working / Waiting for input, and whether it is a background agent), when it started, and the process ID. `startedAt` from `claude agents --json` is now read.
+- **Stop It and Open Here:** sends SIGTERM to that process (as closing its terminal would), waits up to 5 s, then resumes the session here. If the process doesn't stop, the dialog says so. While the process is working, a red line warns that stopping interrupts it.
+- **A process that has ended no longer blocks.** `claude agents` can still list it, and a zombie (ended, not yet collected by its parent) counts as ended. Then the session opens without the dialog.
+
+**Verified (sandbox):** a stand-in process under python3, reported by the fake `claude agents`. The dialog named python3, with the folder, "Working", "2 h ago" and the PID. Stop It and Open Here ended the process and resumed the session. With the ended process still listed, the session opened directly. Core tests cover app names from paths, a child of this process being reported as this app, stopping it, and an ended process.
+
+**Manual checks (Mac)**
+- [ ] `claude --resume <id>` in Terminal.app, then click that session in Anveg Code: the dialog says "running it in Terminal", with the folder and status.
+- [ ] Same from iTerm and from VS Code's terminal: their names show.
+- [ ] Stop It and Open Here: the Terminal's claude exits and the session opens in the app.
+- [ ] When the dialog appears with no obvious place, note what it says it runs in (and tell Claude if it says "this app").
