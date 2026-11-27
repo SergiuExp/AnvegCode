@@ -553,7 +553,7 @@ impl Render for SettingsWindow {
                                         .ghost()
                                         .size(gpui_cn::ButtonSize::Sm)
                                         .label(label)
-                                        .toggled(s.pull_mode == mode)
+                                        .toggled(s.pull_mode == mode).selected(s.pull_mode == mode)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.model.update(cx, |m, cx| {
                                                 m.update_settings(cx, |s| s.pull_mode = mode)
@@ -607,7 +607,7 @@ impl Render for SettingsWindow {
                                         .ghost()
                                         .size(gpui_cn::ButtonSize::Sm)
                                         .label(label)
-                                        .toggled(s.finish_sound == choice)
+                                        .toggled(s.finish_sound == choice).selected(s.finish_sound == choice)
                                         .tooltip(match choice {
                                             FinishSound::Off => "No sound",
                                             FinishSound::WhenNotLooking => {

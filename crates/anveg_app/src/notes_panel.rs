@@ -389,7 +389,7 @@ impl NotesPanel {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label(label)
-                    .toggled(self.active == tab.id)
+                    .toggled(self.active == tab.id).selected(self.active == tab.id)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active = id.clone();
                         cx.notify();

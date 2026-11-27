@@ -424,7 +424,7 @@ impl GitHubPanel {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label(f.label())
-                    .toggled(self.filter == f)
+                    .toggled(self.filter == f).selected(self.filter == f)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.filter = f;
                         this.prs.clear();
@@ -1125,7 +1125,7 @@ impl Render for PrView {
                                     .ghost()
                                     .size(ButtonSize::Sm)
                                     .label("Overview")
-                                    .toggled(self.tab == PrTab::Overview)
+                                    .toggled(self.tab == PrTab::Overview).selected(self.tab == PrTab::Overview)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.tab = PrTab::Overview;
                                         cx.notify();
@@ -1136,7 +1136,7 @@ impl Render for PrView {
                                     .ghost()
                                     .size(ButtonSize::Sm)
                                     .label("Files Changed")
-                                    .toggled(self.tab == PrTab::Files)
+                                    .toggled(self.tab == PrTab::Files).selected(self.tab == PrTab::Files)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.tab = PrTab::Files;
                                         cx.notify();

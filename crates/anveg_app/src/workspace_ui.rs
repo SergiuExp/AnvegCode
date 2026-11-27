@@ -128,7 +128,7 @@ impl ProjectWindow {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label(label)
-                    .toggled(current == tab)
+                    .toggled(current == tab).selected(current == tab)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_sidebar_tab(tab, window, cx)
                     })),
@@ -258,7 +258,7 @@ impl ProjectWindow {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .icon(Icon::from(gpui_kit::assets::IconName::FileText))
-                    .toggled(self.notes_open)
+                    .toggled(self.notes_open).selected(self.notes_open)
                     .tooltip(if self.notes_open {
                         "Hide Notes (⌘⌥N)"
                     } else {

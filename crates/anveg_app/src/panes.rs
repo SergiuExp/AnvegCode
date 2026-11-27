@@ -62,7 +62,7 @@ impl ProjectWindow {
                 .ghost()
                 .size(ButtonSize::Sm)
                 .label("Claude")
-                .toggled(self.tab == Tab::Claude)
+                .toggled(self.tab == Tab::Claude).selected(self.tab == Tab::Claude)
                 .tooltip("Claude (⌘T)")
                 .on_click(cx.listener(|this, _, window, cx| this.show_claude(window, cx))),
         );
@@ -83,7 +83,7 @@ impl ProjectWindow {
                             .ghost()
                             .size(ButtonSize::Sm)
                             .label(label)
-                            .toggled(active)
+                            .toggled(active).selected(active)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.show_terminal(i, window, cx)
                             })),
@@ -131,7 +131,7 @@ impl ProjectWindow {
                             .ghost()
                             .size(ButtonSize::Sm)
                             .label(if dirty { format!("● {title}") } else { title })
-                            .toggled(active)
+                            .toggled(active).selected(active)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.show_doc(i, window, cx)
                             })),

@@ -1088,3 +1088,23 @@ The owner asked for a split view of each changed file when committing (before on
 - [ ] Close one project, right-click the Dock again: it's gone from the list. Open it again: it's back.
 - [ ] Window menu: the same projects under Minimize and Zoom, and choosing one brings it forward.
 - [ ] Two projects with the same folder name: shown with their folders.
+
+## Fix: the selected tab or option is marked again (owner's report, 2026-11-27)
+
+**Problem.** The Git tab looked like it was on Changes while it showed the Stash view, so the Untracked list (where new files are staged) seemed to be missing. Nothing marked which view was selected. Only the hover highlight showed, so whatever the pointer was over looked selected.
+
+**Cause.** In gpui-cn 0.9, `Button::toggled` only tells assistive technology that the button is on. The pressed look comes from `Selectable::selected`, which the app never called. So none of the app's choice buttons marked their selection, for example:
+- the sidebar tabs and the Claude/Terminal tabs;
+- the Git views and repository picker, and the PR filters and the PR's Overview/Files;
+- the image viewer's Image/Source, Fit and 100%;
+- Publish's owner choice;
+- Settings' Pull mode and finish-sound choices;
+- the editor's Wrap toggle, and the notes tabs and notes toggle.
+
+**Fix.** Each of the 19 `.toggled(x)` now also has `.selected(x)`.
+
+**Verified under Xvfb (dark theme):** the Git, Changes and Claude tabs were marked with the pointer away. After switching to Stash, Stash was marked and Changes wasn't. The Changes view lists Untracked files with their + (Stage) buttons and Stage All.
+
+**Manual checks (Mac)**
+- [ ] The sidebar tab, Git view, PR filter and Settings choices each show which one is selected, with the pointer elsewhere.
+- [ ] Git ▸ Changes: new files are under Untracked; + stages one, Stage All stages all.

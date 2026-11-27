@@ -999,7 +999,7 @@ impl GitPanel {
                             .ghost()
                             .size(ButtonSize::Sm)
                             .label(label)
-                            .toggled(i == self.repo)
+                            .toggled(i == self.repo).selected(i == self.repo)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.repo = i;
                                 this.load_view(window, cx);
@@ -1113,7 +1113,7 @@ impl GitPanel {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label(label)
-                    .toggled(self.view == view)
+                    .toggled(self.view == view).selected(self.view == view)
                     .on_click(cx.listener(move |this, _, window, cx| this.show_view(view, window, cx))),
             );
         }

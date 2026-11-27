@@ -324,12 +324,12 @@ impl Render for ImageView {
             bar = bar
                 .child(
                     small("img-show-image", "Image".into())
-                        .toggled(!source)
+                        .toggled(!source).selected(!source)
                         .on_click(cx.listener(|this, _, window, cx| this.set_source(false, window, cx))),
                 )
                 .child(
                     small("img-show-source", "Source".into())
-                        .toggled(source)
+                        .toggled(source).selected(source)
                         .on_click(cx.listener(|this, _, window, cx| this.set_source(true, window, cx))),
                 )
                 .child(div().w(px(1.)).h(px(16.)).bg(c.border));
@@ -343,7 +343,7 @@ impl Render for ImageView {
             bar = bar
                 .child(
                     small("img-fit", "Fit".into())
-                        .toggled(self.zoom == Zoom::Fit)
+                        .toggled(self.zoom == Zoom::Fit).selected(self.zoom == Zoom::Fit)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.zoom = Zoom::Fit;
                             cx.notify();
@@ -351,7 +351,7 @@ impl Render for ImageView {
                 )
                 .child(
                     small("img-100", "100%".into())
-                        .toggled(self.zoom == Zoom::Scale(1.0))
+                        .toggled(self.zoom == Zoom::Scale(1.0)).selected(self.zoom == Zoom::Scale(1.0))
                         .disabled(!can_zoom)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.zoom = Zoom::Scale(1.0);

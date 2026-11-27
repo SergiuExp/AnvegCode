@@ -295,7 +295,7 @@ impl PublishView {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label(if i == 0 { format!("{o} (you)") } else { o.clone() })
-                    .toggled(self.owner == i)
+                    .toggled(self.owner == i).selected(self.owner == i)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.owner = i;
                         cx.notify();

@@ -916,7 +916,7 @@ impl EditorView {
                     .ghost()
                     .size(ButtonSize::Sm)
                     .label("Wrap")
-                    .toggled(self.soft_wrap)
+                    .toggled(self.soft_wrap).selected(self.soft_wrap)
                     .tooltip("Soft Wrap")
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_soft_wrap(window, cx))),
             )
