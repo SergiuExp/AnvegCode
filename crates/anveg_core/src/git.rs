@@ -225,6 +225,62 @@ impl Git {
         self.write(repo, &args).map(drop)
     }
 
+    /// Stage `paths` and return how many files git added or updated
+    /// (`git add -v`); 0 means there was nothing new or changed there.
+    /// Ignored files are skipped, as `git add` does.
+    pub fn add_counted(&self, repo: &Path, paths: &[&str]) -> Result<usize> {
+        let mut args = vec!["add", "-v", "--"];
+        args.extend_from_slice(paths);
+        let out = self.write(repo, &args)?;
+        Ok(out.stdout_str().lines().filter(|l| l.starts_with("add ")).count())
+    }
+
+    /// Stage `paths` even though `.gitignore` ignores them (`git add -f`).
+    pub fn stage_force(&self, repo: &Path, paths: &[&str]) -> Result<()> {
+        let mut args = vec!["add", "-f", "--"];
+        args.extend_from_slice(paths);
+        self.write(repo, &args).map(drop)
+    }
+
+    /// The rule that makes git ignore `path`, in words (e.g. "“build/”
+    /// (line 3 of .gitignore)"), or None when it isn't ignored.
+    pub fn ignore_rule(&self, repo: &Path, path: &str) -> Result<Option<String>> {
+        let out = self.read(repo, &["check-ignore", "-v", "--", path])?;
+        // Exit 1: not ignored.
+        if out.code == Some(1) {
+            return Ok(None);
+        }
+        let text = out.check()?.stdout_str();
+        // "source:line:pattern<TAB>path"
+        let rule = text.lines().next().and_then(|l| l.split('\t').next()).unwrap_or("");
+        let mut parts = rule.splitn(3, ':');
+        Ok(match (parts.next(), parts.next(), parts.next()) {
+            (Some(file), Some(line), Some(pattern)) if !pattern.is_empty() => {
+                Some(format!("“{pattern}” (line {line} of {file})"))
+            }
+            _ if !rule.is_empty() => Some(rule.to_owned()),
+            _ => None,
+        })
+    }
+
+    /// Files and folders git ignores that are not tracked (folders end in
+    /// `/` and stand for everything inside): at most `max`, and the total.
+    pub fn ignored(&self, repo: &Path, max: usize) -> Result<(Vec<String>, usize)> {
+        let out = self
+            .read(
+                repo,
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--ignored=traditional",
+                    "--untracked-files=normal",
+                ],
+            )?
+            .check()?;
+        Ok(parse_ignored(&out.stdout, max))
+    }
+
     pub fn stage_all(&self, repo: &Path) -> Result<()> {
         self.write(repo, &["add", "-A"]).map(drop)
     }
@@ -805,6 +861,15 @@ impl Status {
 }
 
 /// Parse `git status --porcelain=v2 -z --branch`.
+/// The `! path` records of `git status --porcelain=v2 -z --ignored`: the
+/// first `max` paths, and how many there are.
+pub fn parse_ignored(bytes: &[u8], max: usize) -> (Vec<String>, usize) {
+    let text = String::from_utf8_lossy(bytes);
+    let all: Vec<&str> = text.split('\0').filter_map(|r| r.strip_prefix("! ")).collect();
+    let total = all.len();
+    (all.into_iter().take(max).map(str::to_owned).collect(), total)
+}
+
 pub fn parse_status(bytes: &[u8]) -> Status {
     let text = String::from_utf8_lossy(bytes);
     let mut fields = text.split('\0').peekable();
@@ -1282,6 +1347,39 @@ mod tests {
         git.set_index_content(&dir, "n.txt", b"x\n")?;
         let listed = git.read_ok(&dir, &["ls-files", "-s", "--", "n.txt"])?;
         assert!(listed.starts_with("100644 "), "{listed}");
+        Ok(())
+    }
+
+    #[test]
+    fn adding_new_and_ignored_files() -> Result<()> {
+        let (_t, dir) = repo()?;
+        let git = Git::default();
+        sh(
+            &dir,
+            "printf 'build/\\n*.log\\n' > .gitignore && git add .gitignore && git commit -qm init \
+             && mkdir -p build src && echo x > build/out.bin && echo y > debug.log \
+             && echo z > src/new.rs && echo w > src/other.rs",
+        )?;
+        // New files are untracked; ignored ones aren't listed there.
+        let status = git.status(&dir)?;
+        let untracked: Vec<&str> = status.section(Section::Untracked).map(|e| e.path.as_str()).collect();
+        assert_eq!(untracked, ["src/new.rs", "src/other.rs"]);
+        // The ignored ones, folders collapsed.
+        let (ignored, total) = git.ignored(&dir, 10)?;
+        assert_eq!((ignored.clone(), total), (vec!["build/".to_owned(), "debug.log".to_owned()], 2));
+        assert_eq!(git.ignored(&dir, 1)?, (vec!["build/".to_owned()], 2));
+        // Which rule ignores a path.
+        assert_eq!(git.ignore_rule(&dir, "debug.log")?.as_deref(), Some("“*.log” (line 2 of .gitignore)"));
+        assert_eq!(git.ignore_rule(&dir, "src/new.rs")?, None);
+        // Adding a folder stages its new files; again, nothing is left.
+        assert_eq!(git.add_counted(&dir, &["src"])?, 2);
+        assert_eq!(git.add_counted(&dir, &["src"])?, 0);
+        // An ignored file is added only by force.
+        // (git add refuses an ignored path outright.)
+        assert!(git.add_counted(&dir, &["build"]).is_err());
+        git.stage_force(&dir, &["debug.log"])?;
+        let staged: Vec<String> = git.status(&dir)?.section(Section::Staged).map(|e| e.path.clone()).collect();
+        assert_eq!(staged, ["debug.log", "src/new.rs", "src/other.rs"]);
         Ok(())
     }
 

@@ -1108,3 +1108,44 @@ The owner asked for a split view of each changed file when committing (before on
 **Manual checks (Mac)**
 - [ ] The sidebar tab, Git view, PR filter and Settings choices each show which one is selected, with the pointer elsewhere.
 - [ ] Git ▸ Changes: new files are under Untracked; + stages one, Stage All stages all.
+
+## Adding new files to git: Add to Git, and ignored files shown (owner's request, 2026-11-27)
+
+**Problem.** In a repository where git listed nothing, the Git tab said only "No changes.", with no way to tell why new files weren't there and no way to add them. The likely cause is `.gitignore` (or a global excludes file): git never lists ignored files as new, and the app had no way to show or add them.
+
+**Done: Git tab ▸ Changes**
+- **When nothing changed,** it now says "Git sees nothing new or modified in <repository folder>. New files appear here under Untracked; files that .gitignore ignores never do (see below)." Seeing the folder also shows whether the app is looking at the repository you expect.
+- **Ignored by .gitignore ▸ Show** lists the untracked files and folders git ignores (`git status --ignored`, folders collapsed, up to 300), with a count. It is hidden by default, so its extra `git status` runs only on request.
+  - Each entry has **+ Add Anyway** (`git add -f`). A folder asks first, since a folder like build/ or node_modules/ can hold thousands of files.
+  - Clicking a file opens it.
+  - The list refreshes after every change and when you switch repository.
+- **Fixed on the way:** the + / − / ↶ buttons on a file's row also opened its diff, because the click went through to the row. They now only do their own job.
+
+**Done: Files tab ▸ right-click ▸ Add to Git** (files and folders inside a repository, including the project's root folder)
+- **A file or folder git doesn't ignore** is staged: `git add -v`, so the toast can say "Added 3 files to git (staged). Commit in the Git tab.", or "Nothing to add: src has no new or changed files."
+- **An ignored one** asks first, naming the rule: "Secrets.swift is ignored by git. It matches “Secrets.swift” (line 2 of .gitignore), so git never lists it as a new file. Add it anyway (git add -f)?" A folder adds "Everything in the folder is added."
+- Git runs off the UI thread, and the Git tab and file colours refresh afterwards.
+
+**Core:** `Git::add_counted`, `stage_force`, `ignore_rule` (`git check-ignore -v`), `ignored`, `parse_ignored`.
+
+**Tests:** in a real repository with build/ and *.log ignored:
+- new files are listed as untracked, and the ignored ones aren't;
+- the ignored list and its limit;
+- which rule ignores a path, and that a normal new file has none;
+- adding a folder counts its files, and adding again counts none;
+- `git add` refuses an ignored path, and `git add -f` stages it.
+
+**Verified under Xvfb (dark theme)**, in a repository with `.gitignore` = build/, Secrets.swift:
+- **Git tab:**
+  - Show listed Secrets.swift and build/;
+  - + staged Secrets.swift without opening anything;
+  - + on an Untracked file staged it without opening its diff.
+- **With only ignored files present:** "No changes." with the explanation and the repository folder.
+- **Files tab:**
+  - Add to Git on Secrets.swift (Show Ignored Files on) asked with the rule, then staged it, with a toast;
+  - Add to Git on src/ with one new file: "Added 1 file to git (staged)".
+
+**Manual checks (Mac)**
+- [ ] In TinyTimer: Git ▸ Changes ▸ Ignored by .gitignore ▸ Show. Are your new files there? If so, + adds them. If they shouldn't be ignored, remove the rule from .gitignore and they appear under Untracked.
+- [ ] Files tab: right-click a new file ▸ Add to Git, then Git tab: it is under Staged; commit.
+- [ ] Right-click a folder with new files ▸ Add to Git: the toast counts them.

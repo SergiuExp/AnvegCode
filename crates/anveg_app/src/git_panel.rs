@@ -345,8 +345,21 @@ struct NetworkJob {
     cancel: CancelToken,
 }
 
+/// Untracked files git ignores (Changes ▸ Ignored ▸ Show).
+struct IgnoredList {
+    paths: Vec<String>,
+    total: usize,
+    error: Option<String>,
+}
+
+/// How many ignored entries are listed.
+const IGNORED_SHOWN: usize = 300;
+
 pub struct GitPanel {
     store: Entity<GitStore>,
+    /// `None` while hidden; loaded when shown and after each change.
+    ignored: Option<IgnoredList>,
+    show_ignored: bool,
     repo: usize,
     view: View,
     summary: Entity<InputState>,
@@ -395,6 +408,8 @@ impl GitPanel {
         ];
         Self {
             store,
+            ignored: None,
+            show_ignored: false,
             repo: 0,
             view: View::Changes,
             summary,
@@ -456,7 +471,190 @@ impl GitPanel {
     fn after_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.emit(WorkspaceEvent::GitChanged);
         self.load_view(window, cx);
+        if self.show_ignored {
+            self.load_ignored(cx);
+        }
         cx.notify();
+    }
+
+    // -----------------------------------------------------------------
+    // Ignored files
+    // -----------------------------------------------------------------
+
+    fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        if self.show_ignored {
+            self.load_ignored(cx);
+        } else {
+            self.ignored = None;
+        }
+        cx.notify();
+    }
+
+    fn load_ignored(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root(cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        let task = cx.background_spawn(async move { git.ignored(&root, IGNORED_SHOWN) });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.show_ignored {
+                    return;
+                }
+                this.ignored = Some(match result {
+                    Ok((paths, total)) => IgnoredList {
+                        paths,
+                        total,
+                        error: None,
+                    },
+                    Err(e) => IgnoredList {
+                        paths: Vec::new(),
+                        total: 0,
+                        error: Some(format!("{e:#}")),
+                    },
+                });
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Stage an ignored path anyway (`git add -f`); a folder asks first.
+    fn add_ignored(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !path.ends_with('/') {
+            self.run(
+                "Adding…",
+                move |git, root| git.stage_force(&root, &[&path]),
+                window,
+                cx,
+            );
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        let prompt = Prompt::new(
+            format!("Add the folder {path} to git?"),
+            format!(
+                "{path} and everything in it is ignored by .gitignore, so this adds every file inside \
+                 (folders like build/ or node_modules/ can hold thousands). You can unstage them again \
+                 before committing."
+            ),
+        )
+        .cancel()
+        .button("Add Anyway", ButtonStyle::Primary, move |_, window, cx| {
+            let p = path.clone();
+            let _ = weak.update(cx, |this, cx| {
+                this.run("Adding…", move |git, root| git.stage_force(&root, &[&p]), window, cx)
+            });
+            Ok(())
+        });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    fn render_ignored(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let mut section = div().flex().flex_col().child(
+            div()
+                .flex()
+                .items_center()
+                .px_2()
+                .pt_1()
+                .text_xs()
+                .text_color(c.muted_foreground)
+                .child(div().flex_1().child(match &self.ignored {
+                    Some(list) if list.error.is_none() => format!("Ignored by .gitignore ({})", list.total),
+                    _ => "Ignored by .gitignore".to_owned(),
+                }))
+                .child(
+                    Button::new("ignored-toggle")
+                        .ghost()
+                        .size(ButtonSize::Sm)
+                        .label(if self.show_ignored { "Hide" } else { "Show" })
+                        .tooltip("New files that .gitignore ignores: they are never listed above")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_ignored(cx))),
+                ),
+        );
+        if !self.show_ignored {
+            return section.into_any_element();
+        }
+        let Some(list) = &self.ignored else {
+            return section
+                .child(div().px_2().text_xs().text_color(c.muted_foreground).child("Looking…"))
+                .into_any_element();
+        };
+        if let Some(e) = &list.error {
+            return section
+                .child(div().px_2().text_xs().text_color(c.destructive).child(e.clone()))
+                .into_any_element();
+        }
+        if list.paths.is_empty() {
+            return section
+                .child(div().px_2().text_xs().text_color(c.muted_foreground).child("Nothing is ignored."))
+                .into_any_element();
+        }
+        for (i, path) in list.paths.clone().into_iter().enumerate() {
+            let folder = path.ends_with('/');
+            let trimmed = path.trim_end_matches('/');
+            let (dir, name) = match trimmed.rsplit_once('/') {
+                Some((d, n)) => (d.to_owned(), n.to_owned()),
+                None => (String::new(), trimmed.to_owned()),
+            };
+            let name = if folder { format!("{name}/") } else { name };
+            let add = path.clone();
+            let open = root.join(trimmed);
+            section = section.child(
+                div()
+                    .id(SharedString::from(format!("ign-{i}")))
+                    .h(px(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(!folder, |el| el.cursor_pointer())
+                    .hover(|el| el.bg(c.accent.opacity(0.5)))
+                    .child(div().w(px(14.)).text_xs().text_color(c.muted_foreground).child("I"))
+                    .child(div().text_sm().text_color(c.muted_foreground).child(name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child(dir),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("ign-{i}-add")))
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .icon(Icon::from(gpui_kit::assets::IconName::Plus))
+                            .tooltip("Add Anyway (git add -f)")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.add_ignored(add.clone(), window, cx)
+                            })),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if !folder {
+                            cx.emit(WorkspaceEvent::OpenFile {
+                                path: open.clone(),
+                                line: None,
+                                column: None,
+                            });
+                        }
+                    })),
+            );
+        }
+        if list.total > list.paths.len() {
+            section = section.child(
+                div()
+                    .px_2()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(format!("and {} more", list.total - list.paths.len())),
+            );
+        }
+        section.into_any_element()
     }
 
     // -----------------------------------------------------------------
@@ -1003,6 +1201,10 @@ impl GitPanel {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.repo = i;
                                 this.load_view(window, cx);
+                                if this.show_ignored {
+                                    this.ignored = None;
+                                    this.load_ignored(cx);
+                                }
                                 cx.notify();
                             })),
                     );
@@ -1249,11 +1451,20 @@ impl GitPanel {
             list = list.child(
                 div()
                     .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .text_sm()
                     .text_color(c.muted_foreground)
-                    .child("No changes."),
+                    .child("No changes.")
+                    .child(div().text_xs().child(format!(
+                        "Git sees nothing new or modified in {}. New files appear here under Untracked; \
+                         files that .gitignore ignores never do (see below).",
+                        repo.root.display()
+                    ))),
             );
         }
+        let ignored = self.render_ignored(&repo.root, cx);
         let worktrees = (repo.worktrees.len() > 1).then(|| {
             div()
                 .flex()
@@ -1279,6 +1490,7 @@ impl GitPanel {
             .flex_col()
             .child(commit_box)
             .child(list)
+            .child(ignored)
             .children(worktrees)
             .into_any_element()
     }
@@ -1309,6 +1521,8 @@ impl GitPanel {
                         .icon(Icon::from(gpui_kit::assets::IconName::Minus))
                         .tooltip("Unstage")
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            // Not also the row's click (which opens the diff).
+                            cx.stop_propagation();
                             this.unstage(vec![p.clone()], window, cx)
                         })),
                 );
@@ -1323,7 +1537,10 @@ impl GitPanel {
                             .size(ButtonSize::Sm)
                             .icon(Icon::from(gpui_kit::assets::IconName::Undo2))
                             .tooltip("Discard…")
-                            .on_click(cx.listener(move |this, _, _, cx| this.discard(d.clone(), cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.discard(d.clone(), cx)
+                            })),
                     );
                 }
                 buttons = buttons.child(
@@ -1337,6 +1554,7 @@ impl GitPanel {
                             "Stage"
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.stage(vec![p.clone()], window, cx)
                         })),
                 );

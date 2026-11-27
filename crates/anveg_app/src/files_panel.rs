@@ -359,7 +359,104 @@ impl FilesPanel {
         cx.emit(WorkspaceEvent::Prompt(prompt));
     }
 
-    fn menu_for(&self, row: &TreeRow, this: &Entity<Self>) -> Vec<MenuEntry> {
+    /// The repository `path` is in (the innermost), and `path` relative
+    /// to it ("." for the root itself).
+    fn repo_of(&self, path: &Path, cx: &App) -> Option<(PathBuf, String)> {
+        let store = self.store.read(cx);
+        let root = store
+            .repos
+            .iter()
+            .filter(|r| path.starts_with(&r.root))
+            .max_by_key(|r| r.root.as_os_str().len())?
+            .root
+            .clone();
+        let rel = path.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
+        Some((root, if rel.is_empty() { ".".into() } else { rel }))
+    }
+
+    /// File ▸ Add to Git: stage the file, or a folder's new and changed
+    /// files. An ignored path asks first, naming the rule.
+    fn add_to_git(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some((root, rel)) = self.repo_of(&path, cx) else {
+            return;
+        };
+        let git = model(cx).read(cx).git();
+        let (r, p) = (root.clone(), rel.clone());
+        let task = cx.background_spawn(async move {
+            match git.ignore_rule(&r, &p) {
+                Ok(Some(rule)) => Ok(Err(rule)),
+                Ok(None) => git.add_counted(&r, &[&p]).map(Ok),
+                Err(e) => Err(e),
+            }
+        });
+        let shown = self.relative(&path);
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(Ok(0)) => cx.emit(WorkspaceEvent::Toast(
+                    format!("Nothing to add: {shown} has no new or changed files.").into(),
+                )),
+                Ok(Ok(n)) => {
+                    let what = if n == 1 { "1 file".to_owned() } else { format!("{n} files") };
+                    cx.emit(WorkspaceEvent::Toast(
+                        format!("Added {what} to git (staged). Commit in the Git tab.").into(),
+                    ));
+                    cx.emit(WorkspaceEvent::GitChanged);
+                }
+                Ok(Err(rule)) => this.ask_add_ignored(root, rel, shown, rule, cx),
+                Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                    "Could not add to git",
+                    format!("{e:#}"),
+                ))),
+            });
+        }));
+    }
+
+    fn ask_add_ignored(&mut self, root: PathBuf, rel: String, shown: String, rule: String, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let folder = root.join(&rel).is_dir();
+        let prompt = Prompt::new(
+            format!("{shown} is ignored by git"),
+            format!(
+                "It matches {rule}, so git never lists it as a new file. Add it anyway (git add -f)?{}",
+                if folder {
+                    " Everything in the folder is added."
+                } else {
+                    ""
+                }
+            ),
+        )
+        .cancel()
+        .button("Add Anyway", ButtonStyle::Primary, move |_, _, cx| {
+            let (root, rel, shown) = (root.clone(), rel.clone(), shown.clone());
+            let _ = weak.update(cx, |this, cx| this.force_add(root, rel, shown, cx));
+            Ok(())
+        });
+        cx.emit(WorkspaceEvent::Prompt(prompt));
+    }
+
+    /// `git add -f`, off the UI thread (a folder can be large).
+    fn force_add(&mut self, root: PathBuf, rel: String, shown: String, cx: &mut Context<Self>) {
+        let git = model(cx).read(cx).git();
+        let task = cx.background_spawn(async move { git.stage_force(&root, &[&rel]) });
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |_, cx| match result {
+                Ok(()) => {
+                    cx.emit(WorkspaceEvent::Toast(
+                        format!("Added {shown} to git (staged). Commit in the Git tab.").into(),
+                    ));
+                    cx.emit(WorkspaceEvent::GitChanged);
+                }
+                Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
+                    "Could not add to git",
+                    format!("{e:#}"),
+                ))),
+            });
+        }));
+    }
+
+    fn menu_for(&self, row: &TreeRow, this: &Entity<Self>, cx: &App) -> Vec<MenuEntry> {
         let item = |key: &str, label: &str, f: MenuAction| {
             let weak = this.downgrade();
             let f = std::rc::Rc::new(f);
@@ -419,6 +516,15 @@ impl FilesPanel {
                 "rename",
                 "Rename…",
                 Box::new(move |this, cx| this.rename(p.clone(), cx)),
+            ));
+        }
+        if self.repo_of(&path, cx).is_some() {
+            entries.push(MenuEntry::Separator);
+            let p = path.clone();
+            entries.push(item(
+                "add-to-git",
+                "Add to Git",
+                Box::new(move |this, cx| this.add_to_git(p.clone(), cx)),
             ));
         }
         entries.push(MenuEntry::Separator);
@@ -521,7 +627,7 @@ impl FilesPanel {
                         SharedString::from(format!("fm-{}", row.path.display())),
                         &self.menu,
                     )
-                    .items(move |_, cx| entity.read(cx).menu_for(&row_for_menu, &entity))
+                    .items(move |_, cx| entity.read(cx).menu_for(&row_for_menu, &entity, cx))
                     .child(el)
                     .into_any_element(),
                 )
