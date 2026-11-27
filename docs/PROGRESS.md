@@ -1399,3 +1399,22 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] The New Session button and ⌄ menu in both themes; New Session in Worktree… asks for the worktree name.
 - [ ] Close every tab on the right: the start screen shows; Continue resumes the latest session.
 - [ ] A session waiting for permission shows "Needs input" in amber in the list.
+
+**Follow-up (2026-11-27): Commit and Push; Update Project.** The owner asked for two commit buttons (Commit, and Commit and Push), and for one "update the project" button instead of Fetch and Pull.
+- **Two commit buttons**, side by side under the message:
+  - **Commit N Files** (⌘↩);
+  - **Commit and Push** (⇧⌘↩, also in the message field). It commits the checked files, then pushes. A branch with no upstream is published to origin, as Push does.
+  - With Amend they read Amend and Amend and Push. The tooltip warns that an amended commit that was already pushed needs a force push, which the app doesn't do: the push then fails with git's explanation.
+- **Update Project** replaces Fetch and Pull:
+  - with an upstream, it runs `git pull` using the Settings choice, which is now called Update Project (fast-forward only, merge or rebase);
+  - without an upstream, there is nothing to pull into, so it only fetches.
+  - It shows "Updating…" while it runs, and then "Project updated: <what came in>".
+- **Push** stays, with an arrow icon and a tooltip; it finishes with "Pushed: …".
+
+**Verified (sandbox):**
+- Commit and Push with a typed message: the commit was made and pushed; the remote branch and the log showed it, and the branch was no longer ahead.
+- A teammate's commit pushed from another clone, then Update Project: `git pull --ff-only` brought it in, and the toast said "Project updated: feature-x updated with 1 commit".
+
+**Manual checks (Mac)**
+- [ ] ⇧⌘↩ in the message field commits and pushes.
+- [ ] Update Project on a branch with no upstream only fetches; on one with an upstream that has diverged (fast-forward only), it fails with a clear explanation.

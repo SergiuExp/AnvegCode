@@ -30,7 +30,7 @@ use gpui_kit::{
 };
 use uuid::Uuid;
 
-use crate::actions::{Commit as CommitAction, GIT_PANEL_CONTEXT};
+use crate::actions::{Commit as CommitAction, CommitAndPush, GIT_PANEL_CONTEXT};
 use crate::model::model;
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
@@ -446,8 +446,8 @@ impl GitPanel {
                 cx.notify();
             }),
             cx.subscribe_in(&message, window, |this, state, event, window, cx| match event {
-                // ⌘↩ commits (the field takes it first).
-                gpui_cn::InputEvent::PressEnter { secondary: true, .. } => this.commit_shortcut(window, cx),
+                // ⌘↩ commits, ⇧⌘↩ commits and pushes (the field takes them first).
+                gpui_cn::InputEvent::PressEnter { secondary: true, shift } => this.commit(*shift, window, cx),
                 gpui_cn::InputEvent::Change => {
                     if !this.filling
                         && let Some(repo) = this.draft_repo.clone()
@@ -837,11 +837,6 @@ impl GitPanel {
         cx.notify();
     }
 
-    /// ⌘↩: commit the checked files.
-    fn commit_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.commit(window, cx);
-    }
-
     fn is_checked(&self, section: Section, path: &str) -> bool {
         !self.excluded.contains(&row_key(section, path))
     }
@@ -901,7 +896,8 @@ impl GitPanel {
         sel
     }
 
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Commit the checked files; with `push`, push once the commit is made.
+    fn commit(&mut self, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(status) = self.repo_state(cx).and_then(|r| r.status) else {
             return;
         };
@@ -949,7 +945,12 @@ impl GitPanel {
                             this.fill_message("", window, cx);
                         }
                         this.amend = false;
-                        cx.emit(WorkspaceEvent::Toast("Committed.".into()));
+                        if push {
+                            cx.emit(WorkspaceEvent::Toast("Committed. Pushing…".into()));
+                            this.network_op(NetworkOp::Push { set_upstream: None }, window, cx);
+                        } else {
+                            cx.emit(WorkspaceEvent::Toast("Committed.".into()));
+                        }
                     }
                     // Hook output (pre-commit and friends) is in the error.
                     Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
@@ -986,6 +987,24 @@ impl GitPanel {
     // Network (5.7)
     // -----------------------------------------------------------------
 
+    /// Update Project: pull the branch's upstream (with the pull setting:
+    /// fast-forward only, merge or rebase); with no upstream there is
+    /// nothing to pull into, so only fetch.
+    fn update_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_upstream = self
+            .repo_state(cx)
+            .and_then(|r| r.status)
+            .is_some_and(|s| s.branch.upstream.is_some());
+        let op = if has_upstream {
+            NetworkOp::Pull {
+                mode: model(cx).read(cx).settings.pull_mode,
+            }
+        } else {
+            NetworkOp::Fetch
+        };
+        self.network_op(op, window, cx);
+    }
+
     fn network_op(&mut self, op: NetworkOp, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo_state(cx) else {
             return;
@@ -995,11 +1014,14 @@ impl GitPanel {
         }
         let git = model(cx).read(cx).git();
         let label = match &op {
-            NetworkOp::Fetch => "Fetching",
-            NetworkOp::Pull { .. } => "Pulling",
+            NetworkOp::Fetch | NetworkOp::Pull { .. } => "Updating",
             NetworkOp::Push { .. } => "Pushing",
         }
         .to_owned();
+        let done = match &op {
+            NetworkOp::Fetch | NetworkOp::Pull { .. } => "Project updated",
+            NetworkOp::Push { .. } => "Pushed",
+        };
         // The first push publishes the branch.
         let op = match op {
             NetworkOp::Push { .. } => {
@@ -1064,13 +1086,16 @@ impl GitPanel {
                 this.store.update(cx, |s, cx| s.add_activity(entry, cx));
                 match result {
                     Ok(_) => cx.emit(WorkspaceEvent::Toast(
-                        format!("{label} finished: {summary}. See Git ▸ Activity.").into(),
+                        format!("{done}: {summary}. See Git ▸ Activity.").into(),
                     )),
                     Err(e) if anveg_core::process::is_cancelled(&e) => {
                         cx.emit(WorkspaceEvent::Toast(format!("{label} cancelled.").into()))
                     }
                     Err(e) => cx.emit(WorkspaceEvent::Prompt(Prompt::message(
-                        format!("{label} failed"),
+                        match label.as_str() {
+                            "Updating" => "Updating the project failed".to_owned(),
+                            _ => format!("{label} failed"),
+                        },
                         format!("{e:#}"),
                     ))),
                 }
@@ -1391,31 +1416,22 @@ impl GitPanel {
                     .flex()
                     .gap_1()
                     .child(
-                        Button::new("git-fetch")
+                        Button::new("git-update")
                             .ghost()
                             .size(ButtonSize::Sm)
-                            .label("Fetch")
+                            .icon(Icon::from(gpui_kit::assets::IconName::ArrowDown))
+                            .label("Update Project")
+                            .tooltip("Get the latest changes from the remote (git pull; only fetch when the branch has no upstream)")
                             .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.network_op(NetworkOp::Fetch, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("git-pull")
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .label("Pull")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let mode = model(cx).read(cx).settings.pull_mode;
-                                this.network_op(NetworkOp::Pull { mode }, window, cx)
-                            })),
+                            .on_click(cx.listener(|this, _, window, cx| this.update_project(window, cx))),
                     )
                     .child(
                         Button::new("git-push")
                             .ghost()
                             .size(ButtonSize::Sm)
+                            .icon(Icon::from(gpui_kit::assets::IconName::ArrowUp))
                             .label("Push")
+                            .tooltip("Send your commits to the remote (git push)")
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.network_op(NetworkOp::Push { set_upstream: None }, window, cx)
@@ -1565,22 +1581,44 @@ impl GitPanel {
                             }),
                     )
             )
-            // On its own line, full width: fits a narrow sidebar.
+            // Their own line, side by side: fits a narrow sidebar.
             .child({
                 let n = selection.count;
                 let files = if n == 1 { "1 File".to_owned() } else { format!("{n} Files") };
                 let label = match (self.amend, n) {
-                    (true, 0) => "Amend (⌘↩)".to_owned(),
-                    (true, _) => format!("Amend with {files} (⌘↩)"),
-                    (false, _) => format!("Commit {files} (⌘↩)"),
+                    (true, 0) => "Amend".to_owned(),
+                    (true, _) => format!("Amend with {files}"),
+                    (false, _) => format!("Commit {files}"),
                 };
-                Button::new("commit")
-                    .primary()
-                    .size(ButtonSize::Sm)
-                    .w_full()
-                    .label(label)
-                    .disabled(busy || (n == 0 && !self.amend))
-                    .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx)))
+                let nothing = busy || (n == 0 && !self.amend);
+                let pushing = self.network.is_some();
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("commit")
+                            .primary()
+                            .size(ButtonSize::Sm)
+                            .flex_1()
+                            .label(label)
+                            .tooltip("Commit the checked files (⌘↩)")
+                            .disabled(nothing)
+                            .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
+                    )
+                    .child(
+                        Button::new("commit-push")
+                            .outline()
+                            .size(ButtonSize::Sm)
+                            .flex_1()
+                            .label(if self.amend { "Amend and Push" } else { "Commit and Push" })
+                            .tooltip(if self.amend {
+                                "Amend, then push (⇧⌘↩). An amended commit that was already pushed needs a force push, which the app doesn't do."
+                            } else {
+                                "Commit the checked files, then push them (⇧⌘↩)"
+                            })
+                            .disabled(nothing || pushing)
+                            .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
+                    )
             })
             .into_any_element()
     }
@@ -2616,7 +2654,8 @@ impl Render for GitPanel {
             .size_full()
             .flex()
             .flex_col()
-            .on_action(cx.listener(|this, _: &CommitAction, window, cx| this.commit_shortcut(window, cx)))
+            .on_action(cx.listener(|this, _: &CommitAction, window, cx| this.commit(false, window, cx)))
+            .on_action(cx.listener(|this, _: &CommitAndPush, window, cx| this.commit(true, window, cx)))
             .child(header)
             .child(views)
             .child(

@@ -539,8 +539,8 @@ impl Render for SettingsWindow {
                     .child(self.render_github(cx))
                     .child(section("Git"))
                     .child(self.row(
-                        "Pull",
-                        Some("How Pull combines remote changes with yours."),
+                        "Update Project",
+                        Some("How Update Project (git pull) combines remote changes with yours."),
                         {
                             let mut row = div().flex().gap_1();
                             for (mode, label) in [

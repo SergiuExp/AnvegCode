@@ -58,6 +58,7 @@ actions!(
         ShowGitHub,
         // Phase 5
         Commit,
+        CommitAndPush,
         // Notes
         ToggleNotes,
         ToggleLogs,
@@ -147,6 +148,7 @@ pub fn bind_keys(cx: &mut App) {
         ),
         KeyBinding::new("alt-z", ToggleSoftWrap, Some(crate::editor_view::EDITOR_CONTEXT)),
         KeyBinding::new("cmd-enter", Commit, Some(GIT_PANEL_CONTEXT)),
+        KeyBinding::new("cmd-shift-enter", CommitAndPush, Some(GIT_PANEL_CONTEXT)),
         KeyBinding::new("backspace", DeleteSession, Some(SESSION_LIST_CONTEXT)),
         KeyBinding::new("cmd-backspace", DeleteSession, Some(SESSION_LIST_CONTEXT)),
     ]);
