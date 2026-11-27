@@ -233,7 +233,6 @@ pub struct GitHubPanel {
     focused: bool,
     backoff: u32,
     timer: Option<Task<()>>,
-    log_view: Entity<crate::github_log_view::GitHubLogView>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subs: Vec<gpui_kit::Subscription>,
@@ -285,7 +284,6 @@ impl GitHubPanel {
             focused: false,
             backoff: 0,
             timer: None,
-            log_view: cx.new(|cx| crate::github_log_view::GitHubLogView::new("gh-panel-log", true, 180., window, cx)),
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _subs: subs,
@@ -622,7 +620,6 @@ impl Render for GitHubPanel {
                     .overflow_y_scroll()
                     .child(body),
             )
-            .child(self.log_view.clone())
     }
 }
 

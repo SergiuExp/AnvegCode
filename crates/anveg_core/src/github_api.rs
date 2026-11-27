@@ -24,7 +24,7 @@ use crate::gh::{
     PrSummary, RateLimited, RepoInfo, Review, RollupItem, Run, RunDetail,
 };
 use crate::git::Git;
-use crate::github_log::GitHubLog;
+use crate::op_log::OpLog;
 
 pub const API: &str = "https://api.github.com";
 pub const API_VERSION: &str = "2022-11-28";
@@ -299,7 +299,7 @@ pub struct Api {
     token: Option<Secret>,
     base: String,
     /// Every request goes here (method, path, status, time).
-    log: Option<GitHubLog>,
+    log: Option<OpLog>,
 }
 
 impl Api {
@@ -312,12 +312,12 @@ impl Api {
         }
     }
 
-    pub fn with_log(mut self, log: GitHubLog) -> Self {
+    pub fn with_log(mut self, log: OpLog) -> Self {
         self.log = Some(log);
         self
     }
 
-    pub fn log(&self) -> Option<&GitHubLog> {
+    pub fn log(&self) -> Option<&OpLog> {
         self.log.as_ref()
     }
 
@@ -1343,7 +1343,7 @@ mod tests {
 
     #[test]
     fn operations_are_logged_without_secrets() {
-        let log = GitHubLog::new();
+        let log = OpLog::new();
         let t = FakeTransport::default().answer(
             "/user/repos",
             422,

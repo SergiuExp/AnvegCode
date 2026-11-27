@@ -5,7 +5,7 @@
 use anveg_core::config::PaneContent;
 use gpui_cn::TitleBar;
 use gpui_cn::prelude::*;
-use gpui_kit::base::{h_resizable, resizable_panel};
+use gpui_kit::base::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
@@ -539,6 +539,9 @@ impl Render for ProjectWindow {
         let dialog = self.render_dialog(window, cx);
         let toast = self.toast.clone();
         let sidebar_width = self.sidebar_width;
+        let logs = self.logs.clone();
+        let logs_open = logs.read(cx).open;
+        let logs_height = self.logs_height;
 
         div()
             .id("project-window")
@@ -594,6 +597,9 @@ impl Render for ProjectWindow {
             }))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.quick_open(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleNotes, window, cx| this.toggle_notes(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleLogs, window, cx| {
+                this.logs.update(cx, |l, cx| l.toggle(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &PublishToGitHub, window, cx| {
                 this.open_doc(anveg_core::config::DocKey::PublishToGitHub, window, cx)
             }))
@@ -648,8 +654,8 @@ impl Render for ProjectWindow {
             .on_action(cx.listener(|this, _: &OpenSession7, w, cx| this.open_nth(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession8, w, cx| this.open_nth(7, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSession9, w, cx| this.open_nth(8, w, cx)))
-            .child(
-                h_resizable("sidebar-split")
+            .map(|el| {
+                let main = h_resizable("sidebar-split")
                     .with_state(&self.sidebar_state)
                     .child(
                         resizable_panel()
@@ -686,8 +692,26 @@ impl Render for ProjectWindow {
                                         .child(toolbar),
                                 ),
                         ),
-                    ),
-            )
+                    );
+                if logs_open {
+                    // The logs panel along the bottom, under the sidebar
+                    // and the main area; drag its top edge to resize it.
+                    el.child(
+                        v_resizable("logs-split")
+                            .with_state(&self.logs_state)
+                            .child(resizable_panel().child(main))
+                            .child(
+                                resizable_panel()
+                                    .size(px(logs_height))
+                                    .size_range(px(80.)..px(1200.))
+                                    .child(logs),
+                            ),
+                    )
+                } else {
+                    el.child(div().flex_1().min_h_0().child(main))
+                        .child(div().flex_none().h(px(crate::logs_panel::BAR_HEIGHT)).child(logs))
+                }
+            })
             .when_some(toast, |el, text| {
                 el.child(
                     div()

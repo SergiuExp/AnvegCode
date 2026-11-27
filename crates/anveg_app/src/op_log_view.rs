@@ -1,16 +1,19 @@
-//! The GitHub log pane (bottom of the GitHub panel, the Publish tab and the
-//! Open from GitHub window): what the app did with GitHub this run, each
-//! operation with ✓ or ✗ and the requests inside it. Selectable and
-//! copyable (it is a read-only editor; ⌘A ⌘C work, and so does search),
-//! with Copy all and Clear. Memory only: the log starts empty on every
-//! launch.
+//! A log's text: what the app did (the Git log, the GitHub log), each
+//! operation with ✓ or ✗ and what happened inside it. Selectable and
+//! copyable (it is a read-only editor; ⌘A ⌘C work, and so does search).
+//! Memory only: logs start empty on every launch.
 //!
-//! While the text has focus (someone is selecting), new lines wait until
-//! focus leaves, so a selection never jumps.
+//! Two uses: a tab of the window's bottom logs panel (`logs_panel`), where
+//! the panel draws the header; and on its own with a small header of its
+//! own (collapse toggle, newest line, Copy, Clear), as in the Open from
+//! GitHub window.
+//!
+//! While the text has focus (someone is selecting), or the log is not
+//! shown, new lines wait, so a selection never jumps.
 
 use std::time::Duration;
 
-use anveg_core::github_log::{GitHubLog, Level};
+use anveg_core::op_log::{Level, OpLog};
 use futures::StreamExt as _;
 use gpui_cn::prelude::*;
 use gpui_kit::assets::IconName;
@@ -20,28 +23,34 @@ use gpui_kit::{
     SharedString, Styled as _, Task, Window, div, point, px,
 };
 
-use crate::model::model;
 use crate::ui::Colors;
 
 /// How often the text is rebuilt while lines arrive.
 const BATCH: Duration = Duration::from_millis(120);
 
-pub struct GitHubLogView {
+/// The header drawn by a log shown on its own.
+struct OwnHeader {
     id: SharedString,
-    log: GitHubLog,
-    editor: Entity<EditorState>,
-    open: bool,
+    label: SharedString,
     height: f32,
-    /// New lines not yet shown (collapsed, or the text has focus).
+}
+
+pub struct OpLogView {
+    log: OpLog,
+    editor: Entity<EditorState>,
+    /// Shown (its panel tab is open and selected, or it is expanded).
+    visible: bool,
+    /// New lines not yet shown (hidden, or the text has focus).
     stale: bool,
+    header: Option<OwnHeader>,
     _task: Task<()>,
     _subs: Vec<gpui_kit::Subscription>,
 }
 
-impl GitHubLogView {
-    /// `id` keeps element ids apart when several logs are on screen.
-    pub fn new(id: &str, open: bool, height: f32, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let log = model(cx).read(cx).github_log.clone();
+impl OpLogView {
+    /// A log for a tab of the bottom panel: just the text; the panel says
+    /// when it is visible.
+    pub fn new(log: OpLog, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("plaintext")
@@ -49,7 +58,7 @@ impl GitHubLogView {
                 .indent_guides(false)
                 .searchable(true)
                 .soft_wrap(true)
-                .placeholder("Nothing yet. Sign-in, pull requests, CI runs, Publish and clone show up here.")
+                .placeholder(placeholder)
         });
         editor.update(cx, |s, cx| s.set_readonly(true, cx));
         let mut rx = log.watch();
@@ -69,25 +78,58 @@ impl GitHubLogView {
                 this.refresh(window, cx);
             }
         })];
-        let mut this = Self {
-            id: SharedString::from(id.to_owned()),
+        Self {
             log,
             editor,
-            open,
-            height,
+            visible: false,
             stale: true,
+            header: None,
             _task: task,
             _subs: subs,
-        };
-        this.refresh(window, cx);
+        }
+    }
+
+    /// A log on its own, with its own header (collapsed unless `open`).
+    pub fn standalone(
+        id: &str,
+        label: &str,
+        log: OpLog,
+        open: bool,
+        height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(log, "Nothing yet.", window, cx);
+        this.header = Some(OwnHeader {
+            id: SharedString::from(id.to_owned()),
+            label: SharedString::from(label.to_owned()),
+            height,
+        });
+        this.set_visible(open, window, cx);
         this
     }
 
-    /// Show the current lines and scroll to the newest, unless the pane is
-    /// collapsed or someone is selecting text.
+    pub fn log(&self) -> &OpLog {
+        &self.log
+    }
+
+    pub fn set_visible(&mut self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.visible = visible;
+        if visible && self.stale {
+            self.refresh(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn copy_all(&self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.log.text()));
+    }
+
+    /// Show the current lines and scroll to the newest, unless the log is
+    /// hidden or someone is selecting text.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = self.editor.read(cx).focus_handle(cx).contains_focused(window, cx);
-        if !self.open || focused {
+        if !self.visible || focused {
             self.stale = true;
             cx.notify();
             return;
@@ -102,24 +144,35 @@ impl GitHubLogView {
         cx.notify();
     }
 
-    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = !self.open;
-        if self.open && self.stale {
-            self.refresh(window, cx);
-        }
-        cx.notify();
+    fn text(&self) -> gpui_kit::AnyElement {
+        div()
+            .size_full()
+            .text_xs()
+            .overflow_hidden()
+            .child(Editor::new(&self.editor).bordered(false).readonly(true).h_full())
+            .into_any_element()
     }
 }
 
-impl Render for GitHubLogView {
+/// The newest line of `log` as one line of text, and whether it is a
+/// failure (shown in red).
+pub fn newest_line(log: &OpLog) -> Option<(String, bool)> {
+    let last = log.last()?;
+    let failed = last.level == Level::Failed;
+    Some((last.render().lines().next().unwrap_or_default().to_owned(), failed))
+}
+
+impl Render for OpLogView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(header) = &self.header else {
+            return self.text();
+        };
         let c = Colors::of(cx);
-        let id = self.id.clone();
+        let id = header.id.clone();
         let eid = |name: &str| SharedString::from(format!("{id}-{name}"));
-        let last = self.log.last();
-        let failed = last.as_ref().is_some_and(|l| l.level == Level::Failed);
-        let preview = last.map(|l| l.render().lines().next().unwrap_or_default().to_owned());
-        let header = div()
+        let preview = newest_line(&self.log);
+        let failed = preview.as_ref().is_some_and(|p| p.1);
+        let bar = div()
             .flex_none()
             .h(px(28.))
             .px_1()
@@ -131,13 +184,16 @@ impl Render for GitHubLogView {
                 Button::new(eid("toggle"))
                     .ghost()
                     .size(ButtonSize::Xs)
-                    .icon(Icon::from(if self.open {
+                    .icon(Icon::from(if self.visible {
                         IconName::ChevronDown
                     } else {
                         IconName::ChevronUp
                     }))
-                    .label("GitHub log")
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx))),
+                    .label(header.label.clone())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let visible = !this.visible;
+                        this.set_visible(visible, window, cx);
+                    })),
             )
             .child(
                 div()
@@ -148,7 +204,7 @@ impl Render for GitHubLogView {
                     .text_ellipsis()
                     .text_color(if failed { c.destructive } else { c.muted_foreground })
                     // The newest line, so a failure shows even when collapsed.
-                    .when(!self.open, |el| el.children(preview)),
+                    .when(!self.visible, |el| el.children(preview.map(|p| p.0))),
             )
             .child(
                 Button::new(eid("copy"))
@@ -157,9 +213,7 @@ impl Render for GitHubLogView {
                     .icon(Icon::from(IconName::Copy))
                     .tooltip("Copy the whole log")
                     .disabled(self.log.is_empty())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(this.log.text()));
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_all(cx))),
             )
             .child(
                 Button::new(eid("clear"))
@@ -170,6 +224,7 @@ impl Render for GitHubLogView {
                     .disabled(self.log.is_empty())
                     .on_click(cx.listener(|this, _, _, _| this.log.clear())),
             );
+        let height = header.height;
         div()
             .flex_none()
             .flex()
@@ -177,17 +232,16 @@ impl Render for GitHubLogView {
             .border_t_1()
             .border_color(c.border)
             .bg(c.background)
-            .child(header)
-            .when(self.open, |el| {
+            .child(bar)
+            .when(self.visible, |el| {
                 el.child(
                     div()
-                        .h(px(self.height))
+                        .h(px(height))
                         .border_t_1()
                         .border_color(c.border)
-                        .text_xs()
-                        .overflow_hidden()
-                        .child(Editor::new(&self.editor).bordered(false).readonly(true).h_full()),
+                        .child(self.text()),
                 )
             })
+            .into_any_element()
     }
 }

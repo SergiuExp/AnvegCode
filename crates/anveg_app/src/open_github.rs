@@ -35,7 +35,7 @@ pub struct OpenFromGitHub {
     selected: Option<String>,
     error: Option<String>,
     job: Option<CloneJob>,
-    log_view: Entity<crate::github_log_view::GitHubLogView>,
+    log_view: Entity<crate::op_log_view::OpLogView>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<gpui_kit::Subscription>,
 }
@@ -98,7 +98,10 @@ impl OpenFromGitHub {
             selected: None,
             error: None,
             job: None,
-            log_view: cx.new(|cx| crate::github_log_view::GitHubLogView::new("open-github-log", false, 160., window, cx)),
+            log_view: cx.new(|cx| {
+                let log = model(cx).read(cx).github_log.clone();
+                crate::op_log_view::OpLogView::standalone("open-github-log", "GitHub log", log, false, 160., window, cx)
+            }),
             _tasks: Vec::new(),
             _subs: subs,
         };

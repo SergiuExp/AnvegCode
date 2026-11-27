@@ -11,7 +11,7 @@ use anveg_core::config::{AppState, AppWindowState, ProjectStore, Settings, Windo
 use anveg_core::fswatch::FsWatchService;
 use anveg_core::github_api::{self, GitHub, Secret, Transport, UreqTransport};
 use anveg_core::github_auth::{self, KeychainStore, Poll, TokenStore};
-use anveg_core::github_log::{GitHubLog, Level};
+use anveg_core::op_log::{OpLog, Level};
 use anveg_core::git::Git;
 use anveg_core::paths::AppPaths;
 use anveg_core::status::{HookMessage, HookServer, hooks_settings};
@@ -83,7 +83,7 @@ enum VerifyError {
 }
 
 /// Who a token belongs to (`GET /user`).
-fn verify(transport: &Arc<dyn Transport>, token: Secret, log: &GitHubLog) -> Result<String, VerifyError> {
+fn verify(transport: &Arc<dyn Transport>, token: Secret, log: &OpLog) -> Result<String, VerifyError> {
     let api = github_api::Api::new(transport.clone(), Some(token)).with_log(log.clone());
     match log.op("Checking the token with GitHub", || api.get::<github_api::User>("/user")) {
         Ok(u) => Ok(u.login),
@@ -168,7 +168,10 @@ pub struct AppModel {
     pub github_note: Option<String>,
     /// What the app did with GitHub this run (the log under the GitHub
     /// panel). Memory only.
-    pub github_log: GitHubLog,
+    pub github_log: OpLog,
+    /// What the app did with git (commands that change a repository or
+    /// reach a remote).
+    pub git_log: OpLog,
     transport: Arc<dyn Transport>,
     token_store: Arc<dyn TokenStore>,
     /// The `GIT_ASKPASS` script that hands git the token.
@@ -213,7 +216,8 @@ impl AppModel {
             github_token: None,
             device_sign_in: None,
             github_note: None,
-            github_log: GitHubLog::new(),
+            github_log: OpLog::new(),
+            git_log: OpLog::new(),
             transport: Arc::new(UreqTransport::new()),
             token_store: Arc::new(KeychainStore::new(keychain_service())),
             askpass_script: None,
@@ -276,6 +280,7 @@ impl AppModel {
             self.child_env.clone(),
         )
         .with_askpass(askpass)
+        .with_log(Some(self.git_log.clone()))
     }
 
     /// GitHub's API as the signed-in user, if signed in.

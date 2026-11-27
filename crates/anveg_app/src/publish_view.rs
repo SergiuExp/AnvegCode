@@ -17,7 +17,6 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
 };
 
-use crate::github_log_view::GitHubLogView;
 use crate::model::{ModelEvent, model};
 use crate::ui::Colors;
 use crate::workspace::{ButtonStyle, Prompt, WorkspaceEvent};
@@ -38,7 +37,6 @@ pub struct PublishView {
     owner: usize,
     stage: Stage,
     error: Option<String>,
-    log_view: Entity<GitHubLogView>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subs: Vec<gpui_kit::Subscription>,
@@ -77,7 +75,6 @@ impl PublishView {
             owner: 0,
             stage: Stage::Form,
             error: None,
-            log_view: cx.new(|cx| GitHubLogView::new("publish-log", true, 200., window, cx)),
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _subs: subs,
@@ -233,7 +230,6 @@ impl Render for PublishView {
             .flex()
             .flex_col()
             .child(div().flex_1().min_h_0().child(self.render_page(cx)))
-            .child(self.log_view.clone())
     }
 }
 

@@ -19,6 +19,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 
 use crate::claude_env::EnvMap;
+use crate::op_log::{Level, OpLog};
 
 /// How long a command may run unless it says otherwise.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -58,6 +59,8 @@ pub struct Cmd {
     pub timeout: Duration,
     /// Take the repository lock at this path while running.
     pub lock: Option<PathBuf>,
+    /// Record the command, its result and a summary of its output here.
+    pub log: Option<OpLog>,
 }
 
 impl Cmd {
@@ -71,6 +74,7 @@ impl Cmd {
             stdin: None,
             timeout: DEFAULT_TIMEOUT,
             lock: None,
+            log: None,
         }
     }
 
@@ -116,6 +120,12 @@ impl Cmd {
     /// Run while holding the lock for the repository at `repo`.
     pub fn locked(mut self, repo: impl Into<PathBuf>) -> Self {
         self.lock = Some(repo.into());
+        self
+    }
+
+    /// Record this command in `log` when it runs (see [`run_with`]).
+    pub fn logged(mut self, log: Option<&OpLog>) -> Self {
+        self.log = log.cloned();
         self
     }
 
@@ -230,6 +240,127 @@ pub fn run_with(
     cancel: Option<&CancelToken>,
     progress: Option<Progress>,
 ) -> Result<Output> {
+    let Some(log) = &cmd.log else {
+        return run_unlogged(cmd, cancel, progress);
+    };
+    let label = log_label(cmd);
+    log.push(Level::Start, label.clone());
+    let started = Instant::now();
+    let result = run_unlogged(cmd, cancel, progress);
+    let ms = started.elapsed().as_millis();
+    match &result {
+        Ok(out) if out.success() => {
+            for line in output_summary(out) {
+                log.detail(line);
+            }
+            log.push(Level::Ok, format!("{label} ({ms} ms)"));
+        }
+        Ok(out) => {
+            let message = match out.message() {
+                m if m.is_empty() => format!("exited with code {:?}", out.code),
+                m => capped(&last_states(&m)).join("\n"),
+            };
+            log.push(Level::Failed, format!("{label}: {} ({ms} ms)", redact_urls(&message)));
+        }
+        Err(e) => log.push(Level::Failed, format!("{label}: {} ({ms} ms)", redact_urls(&format!("{e:#}")))),
+    }
+    result
+}
+
+/// Lines of output kept in the log after a command.
+const SUMMARY_LINES: usize = 12;
+
+/// "repo: git commit -m \"Fix it\"": the folder it ran in, the program, and
+/// its arguments (git's own `-c` settings left out, long ones shortened,
+/// passwords in URLs hidden).
+fn log_label(cmd: &Cmd) -> String {
+    let program = cmd
+        .program
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut args = cmd.args.as_slice();
+    while program == "git" && args.first().is_some_and(|a| a == "-c") && args.len() >= 2 {
+        args = &args[2..];
+    }
+    let mut line = program;
+    for arg in args {
+        let mut a: String = arg.chars().take(60).collect();
+        if arg.chars().count() > 60 {
+            a.push('…');
+        }
+        let a = a.replace('\n', " ");
+        line.push(' ');
+        if a.is_empty() || a.contains(char::is_whitespace) || a.contains('"') {
+            line.push_str(&format!("\"{}\"", a.replace('"', "\\\"")));
+        } else {
+            line.push_str(&a);
+        }
+    }
+    let line = redact_urls(&line);
+    match cmd.cwd.as_deref().and_then(Path::file_name) {
+        Some(dir) => format!("{}: {line}", dir.to_string_lossy()),
+        None => line,
+    }
+}
+
+/// What a command printed (stdout, then stderr), one line per line with
+/// progress updates reduced to their final state, at most
+/// [`SUMMARY_LINES`].
+fn output_summary(out: &Output) -> Vec<String> {
+    let text = format!("{}\n{}", out.stdout_str(), out.stderr_str());
+    capped(&last_states(&text))
+        .into_iter()
+        .map(|l| redact_urls(&l))
+        .collect()
+}
+
+/// Each line's final state: git redraws progress with `\r`.
+fn last_states(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.split('\r').map(str::trim).rfind(|s| !s.is_empty()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn capped(lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = lines.iter().take(SUMMARY_LINES).cloned().collect();
+    if lines.len() > SUMMARY_LINES {
+        out.push(format!("… {} more lines", lines.len() - SUMMARY_LINES));
+    }
+    out
+}
+
+/// Hide the user and password in URLs: `https://me:tok@host/x` becomes
+/// `https://***@host/x`.
+pub fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn run_unlogged(
+    cmd: &Cmd,
+    cancel: Option<&CancelToken>,
+    progress: Option<Progress>,
+) -> Result<Output> {
     let lock = cmd.lock.as_deref().map(repo_lock);
     let _guard = match &lock {
         Some(lock) => Some(lock.lock().map_err(|_| anyhow!("repository lock poisoned"))?),
@@ -338,6 +469,38 @@ pub fn run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logged_commands() -> Result<()> {
+        let log = OpLog::new();
+        let dir = tempfile::tempdir()?;
+        let ok = Cmd::new("sh")
+            .args(["-c", "printf 'Counting 1%%\\rCounting 100%%, done.\\n' >&2; echo https://me:tok@h/x"])
+            .cwd(dir.path())
+            .logged(Some(&log));
+        run(&ok)?;
+        let failed = Cmd::new("sh").args(["-c", "echo nope >&2; exit 1"]).logged(Some(&log));
+        assert!(!run(&failed)?.success());
+        let text = log.text();
+        let name = dir.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        assert!(text.contains(&format!("▶ {name}: sh -c \"printf")), "{text}");
+        assert!(text.contains("Counting 100%, done."), "{text}");
+        assert!(!text.contains("Counting 1%\n"), "{text}");
+        assert!(text.contains("https://***@h/x") && !text.contains("tok"), "{text}");
+        assert!(text.contains("✗ sh -c \"echo nope >&2; exit 1\": nope ("), "{text}");
+        // Unlogged commands leave nothing.
+        let before = log.len();
+        run(&Cmd::new("sh").args(["-c", "true"]))?;
+        assert_eq!(log.len(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn hides_url_passwords() {
+        assert_eq!(redact_urls("https://u:p@github.com/o/r.git"), "https://***@github.com/o/r.git");
+        assert_eq!(redact_urls("https://github.com/o/r"), "https://github.com/o/r");
+        assert_eq!(redact_urls("a ssh://git@h:22/x b http://t@h"), "a ssh://***@h:22/x b http://***@h");
+    }
 
     #[test]
     fn captures_output_and_exit_code() -> Result<()> {

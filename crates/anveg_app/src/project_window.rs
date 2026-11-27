@@ -237,6 +237,10 @@ pub struct ProjectWindow {
     pub notes_panel: Option<Entity<crate::notes_panel::NotesPanel>>,
     pub notes_open: bool,
     pub notes_width: f32,
+    /// The logs panel at the bottom (Git and GitHub logs).
+    pub logs: Entity<crate::logs_panel::LogsPanel>,
+    pub logs_height: f32,
+    pub logs_state: Entity<ResizableState>,
     pub notes_state: Entity<ResizableState>,
     /// The right side's tab strip, to scroll the shown tab into view.
     pub tab_scroll: gpui_kit::ScrollHandle,
@@ -387,6 +391,28 @@ impl ProjectWindow {
             },
         };
         let git_store = cx.new(|cx| GitStore::new(project_id, cx));
+        let logs = cx.new(|cx| {
+            crate::logs_panel::LogsPanel::new(
+                saved.logs_open,
+                crate::logs_panel::LogTab::from_key(saved.logs_tab.as_deref().unwrap_or("git")),
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe(&logs, |this, _, _: &crate::logs_panel::LogsChanged, cx| {
+            this.save_soon(cx);
+            cx.notify();
+        }));
+        let logs_state = cx.new(|_| ResizableState::default());
+        subscriptions.push(cx.subscribe(
+            &logs_state,
+            |this, state, _: &ResizablePanelEvent, cx| {
+                if let Some(height) = state.read(cx).sizes().get(1) {
+                    this.logs_height = f32::from(*height).clamp(80.0, 1200.0);
+                    this.save_soon(cx);
+                }
+            },
+        ));
         let notes_state = cx.new(|_| ResizableState::default());
         subscriptions.push(cx.subscribe(
             &notes_state,
@@ -437,6 +463,9 @@ impl ProjectWindow {
             notes_open: false,
             notes_width: saved.notes_width.clamp(240.0, 900.0),
             notes_state,
+            logs,
+            logs_height: saved.logs_height.clamp(80.0, 1200.0),
+            logs_state,
             tab_scroll: gpui_kit::ScrollHandle::new(),
             saved_expanded: saved.expanded_folders.clone(),
             sidebar_state,
@@ -2231,6 +2260,9 @@ impl ProjectWindow {
             },
             notes_open: self.notes_open,
             notes_width: self.notes_width,
+            logs_open: self.logs.read(_cx).open,
+            logs_tab: Some(self.logs.read(_cx).tab.key().to_owned()),
+            logs_height: self.logs_height,
         }
     }
 

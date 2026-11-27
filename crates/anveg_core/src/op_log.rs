@@ -1,10 +1,16 @@
-//! The GitHub log: what the app did with GitHub, for when something goes
-//! wrong. Operations (▶ start, ✓ done, ✗ failed, with how long they took),
-//! the HTTP requests inside them (method, path, status, time) and the git
-//! commands of Publish, Open from GitHub and pull request checkout.
+//! Operation logs: what the app did, for when something goes wrong.
+//! Operations (▶ start, ✓ done, ✗ failed, with how long they took) and the
+//! details inside them.
+//!
+//! - The GitHub log: GitHub operations, their HTTP requests (method, path,
+//!   status, time) and the git commands of Publish, Open from GitHub and
+//!   pull request checkout.
+//! - The Git log: every git command the app runs that changes a repository
+//!   or talks to a remote (commit, stage, push, pull, fetch, clone, …),
+//!   with a summary of what git printed (`process::run_with`).
 //!
 //! Kept in memory only (the newest [`MAX_LINES`]), never on disk. Tokens and
-//! request bodies are never written; paths carry no secrets.
+//! request bodies are never written; passwords in URLs are hidden.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -58,9 +64,9 @@ struct Inner {
 
 /// Shared, cheap to clone; usable from any thread.
 #[derive(Clone, Default)]
-pub struct GitHubLog(Arc<Mutex<Inner>>);
+pub struct OpLog(Arc<Mutex<Inner>>);
 
-impl GitHubLog {
+impl OpLog {
     pub fn new() -> Self {
         Self::default()
     }
@@ -147,9 +153,9 @@ impl GitHubLog {
     }
 }
 
-impl std::fmt::Debug for GitHubLog {
+impl std::fmt::Debug for OpLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GitHubLog({} lines)", self.len())
+        write!(f, "OpLog({} lines)", self.len())
     }
 }
 
@@ -159,7 +165,7 @@ mod tests {
 
     #[test]
     fn operations_and_details() {
-        let log = GitHubLog::new();
+        let log = OpLog::new();
         let mut rx = log.watch();
         let r: anyhow::Result<u32> = log.op("Listing repositories", || {
             log.detail("GET /user/repos → 200 (12 ms)");
@@ -188,7 +194,7 @@ mod tests {
 
     #[test]
     fn keeps_the_newest_lines() {
-        let log = GitHubLog::new();
+        let log = OpLog::new();
         for i in 0..MAX_LINES + 10 {
             log.info(i.to_string());
         }

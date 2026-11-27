@@ -13,7 +13,7 @@ pub mod git;
 pub mod git_activity;
 pub mod github_api;
 pub mod github_auth;
-pub mod github_log;
+pub mod op_log;
 pub mod github_publish;
 pub mod images;
 pub mod launcher;

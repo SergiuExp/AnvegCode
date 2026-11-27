@@ -527,10 +527,22 @@ pub struct WindowState {
     pub notes_open: bool,
     #[serde(default = "default_notes_width")]
     pub notes_width: f32,
+    /// The logs panel at the bottom: open, its tab ("git" or "github") and
+    /// its height.
+    #[serde(default)]
+    pub logs_open: bool,
+    #[serde(default)]
+    pub logs_tab: Option<String>,
+    #[serde(default = "default_logs_height")]
+    pub logs_height: f32,
 }
 
 fn default_notes_width() -> f32 {
     340.0
+}
+
+fn default_logs_height() -> f32 {
+    240.0
 }
 
 fn default_sidebar_width() -> f32 {
@@ -563,6 +575,9 @@ impl WindowState {
             expanded_folders: Vec::new(),
             notes_open: false,
             notes_width: default_notes_width(),
+            logs_open: false,
+            logs_tab: None,
+            logs_height: default_logs_height(),
         }
     }
 }

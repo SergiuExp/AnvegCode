@@ -155,6 +155,7 @@ pub fn install(cx: &App) {
             MenuItem::action("GitHub", ShowGitHub),
             MenuItem::separator(),
             MenuItem::action("Notes", ToggleNotes),
+            MenuItem::action("Logs", ToggleLogs),
             MenuItem::separator(),
             MenuItem::action("Next Session", NextSession),
             MenuItem::action("Previous Session", PreviousSession),

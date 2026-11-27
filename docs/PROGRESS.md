@@ -1297,3 +1297,31 @@ The owner found the installed app running three windows, each in its own full-sc
 **Manual check (Mac)**
 - [ ] Files tab: right-click a committed, unchanged file: no Add to Git. Right-click a new file: Add to Git; after it, it turns green and the item is gone.
 - [ ] Show ignored files (eye button): they're orange; new files red; edited files blue, in both themes.
+
+**Follow-up (2026-11-27): a Git log, and both logs in a full-width panel at the bottom.** The owner wanted to see what the app does during git operations, as the GitHub log shows for GitHub. The GitHub log's pane at the bottom of the GitHub tab was too small to read.
+- **Git log.** Every git command that changes a repository or reaches a remote is recorded:
+  - which commands: `Git::write` commands (stage, unstage, commit, push, pull, fetch, branches, stashes, discard, …) and clone;
+  - reads (status, diffs, history) are not recorded;
+  - how: `Cmd::logged` attaches the log, and `process::run_with` records each command;
+  - what a line shows: "▶ repo: git push --progress"; then up to 12 lines of what git printed, with progress redrawn to its final state; then "✓ … (ms)" or "✗ …: git's message".
+  - Git's own `-c` settings are left out. Long arguments are shortened, and passwords in URLs show as `***`.
+- **Renames:** `github_log::GitHubLog` became `op_log::OpLog` (one type for both logs). `github_log_view` became `op_log_view` (`OpLogView`), which can be a panel tab or stand on its own with its own header (Open from GitHub keeps that).
+- **Logs panel** (`logs_panel`):
+  - **Placement:** along the bottom of each project, under the sidebar and the main area.
+  - **Closed:** a thin bar with Git and GitHub tabs and the newest line of the log that changed last (red when it's a failure). A tab whose newest line is a failure has a red dot.
+  - **Open:** click a tab, or View ▸ Logs (⌥⌘L). It shows that log full width, with Copy and Clear. Drag its top edge to resize it.
+  - **Saved:** open, tab and height are saved per project (`logs_open`, `logs_tab`, `logs_height`).
+  - **Removed:** the small log panes in the GitHub tab and in Publish.
+
+**Verified (sandbox):**
+- Stage, fetch, push, unstage: each logged with its time; push showed "Everything up-to-date".
+- A pull with the remote moved away: ✗ in red with git's whole message, a red dot on the Git tab, and the closed bar showed the failure in red.
+- Dragging the top edge resized the panel, and the height, tab and open state were saved.
+- The GitHub tab showed the sign-in line. The GitHub sidebar no longer has its own log.
+- Core tests: `logged_commands` (label, progress reduced, URL password hidden, failure message, unlogged commands not recorded) and `hides_url_passwords`.
+
+**Manual checks (Mac)**
+- [ ] Commit, push and pull a real repository: each shows in the Git log with git's output. ⌥⌘L opens and closes the panel.
+- [ ] Push with a wrong remote or no network: the Git tab gets a red dot and the bar shows the error in red.
+- [ ] Resize the panel, quit and relaunch: same height, tab and open state.
+- [ ] GitHub operations (sign in, pull requests, Publish) appear in the GitHub tab.

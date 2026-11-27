@@ -107,7 +107,7 @@ The app talks to GitHub's API directly (the `gh` CLI is not needed). Sign in fro
 
 The token is kept in the macOS Keychain, never in a file or the log. git uses it for https remotes on github.com (through a `GIT_ASKPASS` helper that answers only github.com prompts), so pushing, pulling and cloning need no separate login. Sign Out removes it.
 
-The **GitHub log** at the bottom of the GitHub tab (also in Publish to GitHub and Open from GitHub) lists what the app did with GitHub this run: each operation with ✓ or ✗ and why, the requests inside it, the git steps of Publish, checkout and clone, and sign-in. Select and copy from it, or use Copy. It is kept in memory only, never contains the token or request bodies, and starts empty on each launch.
+The **logs panel** along the bottom of each project (View ▸ Logs, ⌥⌘L, or click its Git or GitHub tab) shows what the app did this run. The **Git** log lists every git command that changes a repository or reaches a remote (stage, commit, push, pull, fetch, branches, stashes, clone, …) with ✓ or ✗, how long it took and what git printed. The **GitHub** log lists each GitHub operation, the requests inside it, the git steps of Publish, checkout and clone, and sign-in. A tab whose newest line is a failure gets a red dot, and the closed bar shows the newest line. Drag the panel's top edge to resize it. Select and copy from it, or use Copy. The logs are kept in memory only, never contain the token, passwords in URLs or request bodies, and start empty on each launch.
 
 ## Files
 

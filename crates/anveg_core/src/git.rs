@@ -26,6 +26,9 @@ pub struct Git {
     /// Answers git's https password prompt for github.com with the
     /// signed-in GitHub token.
     pub askpass: Option<Askpass>,
+    /// Where commands that change a repository or reach a remote are
+    /// recorded (the Git log). Reads (status, diffs, …) are not.
+    pub log: Option<crate::op_log::OpLog>,
 }
 
 /// `GIT_ASKPASS`: a small script (see `github_auth::write_askpass`) that
@@ -43,6 +46,7 @@ impl Default for Git {
             program: PathBuf::from("git"),
             env: None,
             askpass: None,
+            log: None,
         }
     }
 }
@@ -53,11 +57,17 @@ impl Git {
             program,
             env,
             askpass: None,
+            log: None,
         }
     }
 
     pub fn with_askpass(mut self, askpass: Option<Askpass>) -> Self {
         self.askpass = askpass;
+        self
+    }
+
+    pub fn with_log(mut self, log: Option<crate::op_log::OpLog>) -> Self {
+        self.log = log;
         self
     }
 
@@ -80,7 +90,7 @@ impl Git {
     /// A command that changes the repository: runs under its lock and may
     /// take optional locks.
     fn write_cmd(&self, repo: &Path) -> Cmd {
-        let mut cmd = self.cmd(repo).locked(repo);
+        let mut cmd = self.cmd(repo).locked(repo).logged(self.log.as_ref());
         cmd.extra_env.retain(|(k, _)| k != "GIT_OPTIONAL_LOCKS");
         cmd
     }
@@ -568,7 +578,8 @@ impl Git {
             .cmd(parent)
             .args(["clone", "--progress", url])
             .arg(dest.to_string_lossy().into_owned())
-            .timeout(NETWORK_TIMEOUT);
+            .timeout(NETWORK_TIMEOUT)
+            .logged(self.log.as_ref());
         let out = process::run_with(&cmd, Some(cancel), progress)?;
         if out.success() {
             Ok(())
