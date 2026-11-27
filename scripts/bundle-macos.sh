@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build "Anveg Code.app" (build plan, M9) and sign it ad hoc for local use.
+# Build "Anveg Code.app" (build plan, M9) and sign it for local use.
 #
 #   scripts/bundle-macos.sh              # this Mac's architecture
 #   UNIVERSAL=1 scripts/bundle-macos.sh  # Apple silicon + Intel (lipo)
 #   BUNDLE_ID=com.example.anveg scripts/bundle-macos.sh
+#   SIGN_IDENTITY=- scripts/bundle-macos.sh   # ad hoc (default: Apple Development)
 #
 # Output: dist/Anveg Code.app (with Contents/MacOS/anveg-code and the
 # anveg-hook helper next to it, where the app looks for it).
@@ -67,10 +68,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature for local use (not notarized): the helper first, then
-# the bundle.
-codesign --force --sign - "$APP/Contents/MacOS/anveg-hook"
-codesign --force --sign - "$APP"
+# Signature for local use (not notarized): the helper first, then the
+# bundle. A real identity (the first "Apple Development" one, or
+# SIGN_IDENTITY) keeps the designated requirement the same across builds,
+# so the Keychain's "Always Allow" survives updates; an ad-hoc signature
+# (SIGN_IDENTITY=-, or no identity found) is tied to this build's hash.
+if [ -z "${SIGN_IDENTITY:-}" ]; then
+  SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Apple Development: .*"$/\1/p' | head -1)
+  SIGN_IDENTITY=${SIGN_IDENTITY:--}
+fi
+[ "$SIGN_IDENTITY" = - ] && echo "Signing ad hoc: the Keychain will ask again after each build." >&2
+codesign --force --timestamp=none --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/anveg-hook"
+codesign --force --timestamp=none --sign "$SIGN_IDENTITY" "$APP"
 codesign --verify --verbose=1 "$APP"
 
 echo
