@@ -112,6 +112,12 @@ impl AppPaths {
         self.support_dir.join("activity").join(format!("{project_id}.json"))
     }
 
+    /// `commit-messages.json`: the Git tab's unfinished commit message and
+    /// recent messages, per repository.
+    pub fn commit_messages_file(&self) -> PathBuf {
+        self.support_dir.join("commit-messages.json")
+    }
+
     /// Create the directories if they do not exist.
     pub fn ensure_dirs(&self) -> Result<()> {
         for dir in [&self.support_dir, &self.logs_dir] {

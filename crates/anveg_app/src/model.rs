@@ -178,6 +178,9 @@ pub struct AppModel {
     askpass_script: Option<PathBuf>,
     device_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
+    /// The Git tab's unfinished and recent commit messages.
+    pub commit_messages: anveg_core::commit_messages::CommitMessages,
+    commit_messages_task: Option<Task<()>>,
     _hook_task: Option<Task<()>>,
 }
 
@@ -187,6 +190,7 @@ impl AppModel {
     pub fn new(paths: AppPaths, cx: &mut Context<Self>) -> Self {
         let settings = Settings::load(&paths.settings_file());
         let projects = ProjectStore::load(&paths.projects_file());
+        let commit_messages = anveg_core::commit_messages::CommitMessages::load(&paths.commit_messages_file());
         let fswatch = match FsWatchService::new() {
             Ok(w) => Some(Arc::new(w)),
             Err(error) => {
@@ -223,6 +227,8 @@ impl AppModel {
             askpass_script: None,
             device_task: None,
             save_task: None,
+            commit_messages,
+            commit_messages_task: None,
             _hook_task: None,
         };
         this.start_hooks(cx);
@@ -683,6 +689,34 @@ impl AppModel {
         self.app_windows.iter().find(|w| w.id == id)
     }
 
+    /// Keep the unfinished commit message for `repo` (saved after a pause).
+    pub fn set_commit_draft(&mut self, repo: &std::path::Path, text: &str, cx: &mut Context<Self>) {
+        if self.commit_messages.set_draft(repo, text) {
+            self.save_commit_messages(Duration::from_millis(700), cx);
+        }
+    }
+
+    /// `message` was committed in `repo`: into Recent, draft cleared.
+    pub fn commit_recorded(&mut self, repo: &std::path::Path, message: &str, cx: &mut Context<Self>) {
+        self.commit_messages.committed(repo, message);
+        self.save_commit_messages(Duration::ZERO, cx);
+    }
+
+    /// Write `commit-messages.json` off the UI thread after `delay`.
+    fn save_commit_messages(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        let path = self.paths.commit_messages_file();
+        self.commit_messages_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let Ok(messages) = this.update(cx, |this, _| this.commit_messages.clone()) else {
+                return;
+            };
+            let write = cx.background_spawn(async move { messages.save(&path) });
+            if let Err(error) = write.await {
+                tracing::warn!(%error, "could not save commit messages");
+            }
+        }));
+    }
+
     /// Save `state.json` after 500 ms of quiet.
     pub fn schedule_save(&mut self, cx: &mut Context<Self>) {
         if self.quitting {
@@ -753,6 +787,12 @@ impl AppModel {
         let state = self.collect_state(cx);
         if let Err(error) = state.save(&self.paths.state_file()) {
             tracing::error!(%error, "could not save window state");
+        }
+        // A draft typed in the last moment, before its delayed save.
+        if self.commit_messages_task.take().is_some()
+            && let Err(error) = self.commit_messages.save(&self.paths.commit_messages_file())
+        {
+            tracing::warn!(%error, "could not save commit messages");
         }
     }
 

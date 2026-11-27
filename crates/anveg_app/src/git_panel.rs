@@ -21,7 +21,7 @@ use anveg_core::process::CancelToken;
 use anveg_core::time::{now_millis, relative};
 use futures::StreamExt as _;
 use gpui_cn::prelude::*;
-use gpui_cn::{Input, InputState, Switch, Textarea, TextareaState};
+use gpui_cn::{Switch, Textarea, TextareaState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -399,8 +399,13 @@ pub struct GitPanel {
     show_ignored: bool,
     repo: usize,
     view: View,
-    summary: Entity<InputState>,
-    body: Entity<TextareaState>,
+    /// The commit message: one field, its first line the summary.
+    message: Entity<TextareaState>,
+    /// The repository whose draft the message field holds.
+    draft_repo: Option<PathBuf>,
+    /// Filling the field from code (a draft, Recent, Amend), not typing.
+    filling: bool,
+    recent_menu: Entity<gpui_cn::MenuState>,
     amend: bool,
     busy: Option<String>,
     network: Option<NetworkJob>,
@@ -422,25 +427,32 @@ impl Focusable for GitPanel {
 
 impl GitPanel {
     pub fn new(store: Entity<GitStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let summary = cx.new(|cx| InputState::new(window, cx).placeholder("Summary"));
-        let body = cx.new(|cx| {
+        let message = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Description")
-                .auto_grow(2, 8)
+                .placeholder("Commit message\n\nThe first line is the summary.")
+                .auto_grow(3, 12)
         });
+        let recent_menu = cx.new(gpui_cn::MenuState::new);
+        // The shown repository's unfinished message, once the panel exists.
+        cx.defer_in(window, |this: &mut Self, window, cx| this.sync_draft(window, cx));
         let subs = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.observe(&summary, |_, _, cx| cx.notify()),
-            // ⌘↩ inside the message fields (the inputs take it first).
-            cx.subscribe_in(&summary, window, |this, _, event, window, cx| {
-                if let gpui_cn::InputEvent::PressEnter { secondary: true, .. } = event {
-                    this.commit(false, window, cx);
-                }
+            cx.observe_in(&store, window, |this, _, window, cx| {
+                this.sync_draft(window, cx);
+                cx.notify();
             }),
-            cx.subscribe_in(&body, window, |this, _, event, window, cx| {
-                if let gpui_cn::InputEvent::PressEnter { secondary: true, .. } = event {
-                    this.commit(false, window, cx);
+            cx.subscribe_in(&message, window, |this, state, event, window, cx| match event {
+                // ⌘↩ commits (the field takes it first).
+                gpui_cn::InputEvent::PressEnter { secondary: true, .. } => this.commit_shortcut(window, cx),
+                gpui_cn::InputEvent::Change => {
+                    if !this.filling
+                        && let Some(repo) = this.draft_repo.clone()
+                    {
+                        let text = state.read(cx).value().to_string();
+                        model(cx).update(cx, |m, cx| m.set_commit_draft(&repo, &text, cx));
+                    }
+                    cx.notify();
                 }
+                _ => {}
             }),
         ];
         Self {
@@ -449,8 +461,10 @@ impl GitPanel {
             show_ignored: false,
             repo: 0,
             view: View::Changes,
-            summary,
-            body,
+            message,
+            draft_repo: None,
+            filling: false,
+            recent_menu,
             amend: false,
             busy: None,
             network: None,
@@ -785,22 +799,65 @@ impl GitPanel {
         cx.emit(WorkspaceEvent::Prompt(prompt));
     }
 
-    fn commit(&mut self, stage_all: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let summary = self.summary.read(cx).value().trim().to_owned();
-        let body = self.body.read(cx).value().trim().to_owned();
-        if summary.is_empty() {
-            cx.emit(WorkspaceEvent::Toast("Write a summary first.".into()));
+    /// Put `text` in the message field (not as typing: the draft is
+    /// saved separately).
+    fn fill_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.filling = true;
+        let text = text.to_owned();
+        self.message.update(cx, |m, cx| m.set_value(text, window, cx));
+        self.filling = false;
+    }
+
+    /// When the shown repository changed, show its unfinished message.
+    fn sync_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.repo_root(cx);
+        if root == self.draft_repo {
             return;
         }
-        let message = if body.is_empty() {
-            summary
-        } else {
-            format!("{summary}\n\n{body}")
-        };
+        let draft = root
+            .as_deref()
+            .map(|r| model(cx).read(cx).commit_messages.draft(r).to_owned())
+            .unwrap_or_default();
+        self.draft_repo = root;
+        self.fill_message(&draft, window, cx);
+    }
+
+    /// Recent ▸ a message: put it in the field (and keep it as the draft).
+    fn use_recent(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.fill_message(&text, window, cx);
+        if let Some(repo) = self.draft_repo.clone() {
+            model(cx).update(cx, |m, cx| m.set_commit_draft(&repo, &text, cx));
+        }
+        cx.notify();
+    }
+
+    /// ⌘↩: what the commit button shows (Stage All and Commit when nothing
+    /// is staged but there are changes).
+    fn commit_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stage_all = !self.amend
+            && self
+                .repo_state(cx)
+                .and_then(|r| r.status)
+                .is_some_and(|s| !s.has_staged() && !s.is_clean());
+        self.commit(stage_all, window, cx);
+    }
+
+    fn commit(&mut self, stage_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.message.read(cx).value().to_string();
+        if anveg_core::commit_messages::summary_line(&text).is_empty() {
+            cx.emit(WorkspaceEvent::Toast(
+                "Write a commit message first (its first line is the summary).".into(),
+            ));
+            return;
+        }
+        // Trailing blank lines and spaces go; the rest is kept as typed.
+        let message = text.trim().to_owned();
         let amend = self.amend;
         let Some(root) = self.repo_root(cx) else {
             return;
         };
+        let committed_root = root.clone();
+        let committed_message = message.clone();
         let git = model(cx).read(cx).git();
         self.busy = Some("Committing…".into());
         cx.notify();
@@ -816,8 +873,10 @@ impl GitPanel {
                 this.busy = None;
                 match result {
                     Ok(_) => {
-                        this.summary.update(cx, |s, cx| s.set_value("", window, cx));
-                        this.body.update(cx, |s, cx| s.set_value("", window, cx));
+                        model(cx).update(cx, |m, cx| m.commit_recorded(&committed_root, &committed_message, cx));
+                        if this.draft_repo.as_deref() == Some(committed_root.as_path()) {
+                            this.fill_message("", window, cx);
+                        }
                         this.amend = false;
                         cx.emit(WorkspaceEvent::Toast("Committed.".into()));
                     }
@@ -834,7 +893,7 @@ impl GitPanel {
 
     fn toggle_amend(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.amend = on;
-        if on && self.summary.read(cx).value().trim().is_empty() {
+        if on && self.message.read(cx).value().trim().is_empty() {
             let Some(root) = self.repo_root(cx) else {
                 return;
             };
@@ -843,10 +902,8 @@ impl GitPanel {
             self._tasks.push(cx.spawn_in(window, async move |this, cx| {
                 if let Ok(message) = task.await {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        let (s, b) = message.split_once("\n\n").unwrap_or((&message, ""));
-                        let (s, b) = (s.to_owned(), b.to_owned());
-                        this.summary.update(cx, |i, cx| i.set_value(s, window, cx));
-                        this.body.update(cx, |i, cx| i.set_value(b, window, cx));
+                        let message = message.trim_end().to_owned();
+                        this.use_recent(message, window, cx);
                     });
                 }
             }));
@@ -1361,7 +1418,14 @@ impl GitPanel {
 
     fn render_commit_box(&mut self, status: &Status, cx: &mut Context<Self>) -> AnyElement {
         let c = Colors::of(cx);
-        let summary_len = self.summary.read(cx).value().chars().count();
+        let text = self.message.read(cx).value().to_string();
+        let summary_len = anveg_core::commit_messages::summary_line(&text).chars().count();
+        let recent: Vec<String> = self
+            .draft_repo
+            .as_deref()
+            .map(|r| model(cx).read(cx).commit_messages.recent(r).to_vec())
+            .unwrap_or_default();
+        let weak = cx.entity().downgrade();
         let nothing_staged = !status.has_staged() && !self.amend;
         let busy = self.busy.is_some();
         div()
@@ -1372,16 +1436,15 @@ impl GitPanel {
             .py_1()
             .border_b_1()
             .border_color(c.border)
-            .child(Input::new(&self.summary))
+            .child(Textarea::new(&self.message))
             .when(summary_len > 72, |el| {
                 el.child(
                     div()
                         .text_xs()
                         .text_color(c.destructive)
-                        .child(format!("Summary is {summary_len} characters; 72 or fewer reads best.")),
+                        .child(format!("The first line is {summary_len} characters; 72 or fewer reads best.")),
                 )
             })
-            .child(Textarea::new(&self.body))
             .child(
                 div()
                     .flex()
@@ -1395,23 +1458,60 @@ impl GitPanel {
                             })),
                     )
                     .child(div().text_xs().child("Amend"))
-                    .child(div().flex_1())
-                    .child(if nothing_staged && !status.is_clean() {
-                        Button::new("commit-all")
-                            .primary()
-                            .size(ButtonSize::Sm)
-                            .label("Stage All and Commit")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx)))
-                    } else {
-                        Button::new("commit")
-                            .primary()
-                            .size(ButtonSize::Sm)
-                            .label(if self.amend { "Amend (⌘↩)" } else { "Commit (⌘↩)" })
-                            .disabled(busy || nothing_staged)
-                            .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx)))
-                    }),
+                    .child(
+                        gpui_cn::DropdownMenu::new("recent-messages", &self.recent_menu)
+                            .trigger(
+                                Button::new("recent-trigger")
+                                    .ghost()
+                                    .size(ButtonSize::Xs)
+                                    .icon(Icon::from(gpui_kit::assets::IconName::ChevronDown))
+                                    .label("Recent")
+                                    .tooltip("Use a message you committed before")
+                                    .disabled(recent.is_empty()),
+                            )
+                            .items(move |_, _| {
+                                recent
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, m)| {
+                                        let weak = weak.clone();
+                                        let full = m.clone();
+                                        let mut label: String =
+                                            anveg_core::commit_messages::summary_line(m).chars().take(60).collect();
+                                        if anveg_core::commit_messages::summary_line(m).chars().count() > 60 {
+                                            label.push('…');
+                                        }
+                                        gpui_cn::MenuEntry::Item(
+                                            gpui_cn::MenuItem::new(format!("recent-{i}"), label).on_select(
+                                                move |window, cx| {
+                                                    let full = full.clone();
+                                                    let _ = weak.update(cx, |this, cx| this.use_recent(full, window, cx));
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .collect()
+                            }),
+                    )
             )
+            // On its own line, full width: fits a narrow sidebar.
+            .child(if nothing_staged && !status.is_clean() {
+                Button::new("commit-all")
+                    .primary()
+                    .size(ButtonSize::Sm)
+                    .w_full()
+                    .label("Stage All and Commit (⌘↩)")
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx)))
+            } else {
+                Button::new("commit")
+                    .primary()
+                    .size(ButtonSize::Sm)
+                    .w_full()
+                    .label(if self.amend { "Amend (⌘↩)" } else { "Commit (⌘↩)" })
+                    .disabled(busy || nothing_staged)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx)))
+            })
             .into_any_element()
     }
 
@@ -1606,6 +1706,7 @@ impl GitPanel {
             return;
         };
         self.repo = i;
+        self.sync_draft(window, cx);
         self.view = View::Changes;
         self.load_view(window, cx);
         if self.show_ignored {
@@ -2395,9 +2496,7 @@ impl Render for GitPanel {
             .size_full()
             .flex()
             .flex_col()
-            .on_action(cx.listener(|this, _: &CommitAction, window, cx| {
-                this.commit(false, window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &CommitAction, window, cx| this.commit_shortcut(window, cx)))
             .child(header)
             .child(views)
             .child(

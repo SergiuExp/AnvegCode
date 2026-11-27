@@ -1325,3 +1325,27 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] Push with a wrong remote or no network: the Git tab gets a red dot and the bar shows the error in red.
 - [ ] Resize the panel, quit and relaunch: same height, tab and open state.
 - [ ] GitHub operations (sign in, pull requests, Publish) appear in the GitHub tab.
+
+**Follow-up (2026-11-27): one commit message field, remembered.** The owner asked for a single field, as other git tools have, and for the app to remember commit messages.
+- **One field.** The Git tab's Summary and Description became one multi-line field (it grows from 3 to 12 lines).
+  - The first line is the summary; the warning past 72 characters is about that line only.
+  - The message is committed as typed, with trailing blank space trimmed.
+  - Enter starts a new line, and ⌘↩ commits.
+  - The commit button is on its own full-width line, so it fits a narrow sidebar.
+  - ⌘↩ does what the button says: Stage All and Commit when nothing is staged but there are changes (before, it failed with nothing staged).
+  - Amend with an empty field loads the last commit's whole message.
+- **Remembered** (`anveg_core::commit_messages`, in `<support dir>/commit-messages.json`, never in the repository; per repository):
+  - **The unfinished message:** saved as you type (after a short pause, off the UI thread, and on quit). It comes back after switching repositories, closing the project or restarting. A commit clears it.
+  - **Recent:** the last 20 messages committed from the app, newest first, without duplicates. The **Recent** menu next to Amend lists their first lines; choosing one puts the whole message in the field.
+
+**Verified (sandbox):**
+- A two-line message was saved as the draft while typing, and was still there after restarting the app.
+- Committing a staged file made a commit with that summary and body, cleared the field, and added the message to Recent.
+- Recent listed its first line; choosing it filled the field with the whole message.
+- Core test `drafts_and_recent_messages`.
+
+**Manual checks (Mac)**
+- [ ] Type a message, quit with ⌘Q right away, relaunch: the message is there.
+- [ ] Two projects: each repository keeps its own unfinished message.
+- [ ] ⌘↩ in the field commits; with nothing staged it stages all and commits.
+- [ ] Recent ▸ a message, then Amend: the field holds the chosen message, not replaced.
