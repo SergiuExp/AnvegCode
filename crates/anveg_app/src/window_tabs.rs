@@ -188,17 +188,23 @@ impl AppWindow {
             .gap_1()
             .overflow_x_scroll();
         if self.name.is_some() || several_windows {
+            // The window's name: a quiet label, set off from the tabs by a
+            // divider, so it is not read as one more (unselected) tab.
             tabs = tabs.child(
                 div()
                     .flex_shrink_0()
                     .self_center()
-                    .max_w(px(200.))
-                    .truncate()
-                    .pr_2()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(c.muted_foreground)
-                    .child(self.display_name(cx)),
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .max_w(px(200.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(c.muted_foreground.opacity(0.8))
+                            .child(self.display_name(cx)),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).mx_2().bg(c.foreground.opacity(0.2))),
             );
         }
         for (i, view) in self.projects.iter().enumerate() {
@@ -231,19 +237,21 @@ impl AppWindow {
                 .border_b_0()
                 .when(current, |el| {
                     el.bg(c.background)
-                        .border_color(c.border)
                         .border_t_2()
                         .border_color(c.selected_bar)
                         .text_color(c.foreground)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                 })
-                // Outlined and lightly filled, so they read as tabs; the
-                // shown one takes the content's background and joins it.
+                // Outlined and filled with a tint of the text color (lighter
+                // on dark themes, darker on light ones), with near-full
+                // text, so they read as tabs; the shown one takes the
+                // content's background and joins it.
                 .when(!current, |el| {
-                    el.bg(c.accent.opacity(0.45))
-                        .border_color(c.border)
-                        .text_color(c.muted_foreground)
+                    el.bg(c.foreground.opacity(0.07))
+                        .border_color(c.foreground.opacity(0.16))
+                        .text_color(c.foreground.opacity(0.8))
                         .cursor_pointer()
-                        .hover(|s| s.bg(c.accent).text_color(c.foreground))
+                        .hover(|s| s.bg(c.foreground.opacity(0.12)).text_color(c.foreground))
                 })
                 .when(!menu_open, |el| {
                     el.tooltip(move |_, cx| crate::ui::LinesTooltip::build(vec![path.clone()], cx))

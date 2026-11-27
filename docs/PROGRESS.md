@@ -1243,3 +1243,13 @@ The owner found the installed app running three windows, each in its own full-sc
 **Manual check (Mac)**
 - [ ] File ▸ Open Recent ▸ a project that isn't open: it becomes a tab of the window in front. Window ▸ an open project shows its tab.
 
+
+**Follow-up (2026-11-27): inactive tabs too faint in dark mode.** The owner could barely tell the inactive tabs from the window's name at the left of the same row: both used the muted grey, and the name was semibold.
+- Inactive tabs: filled and outlined with a tint of the text color (lighter on dark themes, darker on light ones), and their names in near-full text color. Hover brightens them.
+- The shown tab: the content's background, the blue edge, and medium weight.
+- The window's name: smaller, regular weight, dimmer, and set off from the tabs by a short divider, so it no longer looks like one more tab.
+
+**Verified (sandbox):** a window with two projects plus a second window (so the name shows), in dark and light themes: the inactive tab reads as a tab and stands apart from the name.
+
+**Manual check (Mac)**
+- [ ] Dark mode, two projects in a window and a second window open: the inactive tab is easy to see and doesn't blend with the window's name; hovering it brightens it. Same in light mode.
