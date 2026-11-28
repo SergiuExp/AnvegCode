@@ -5,6 +5,7 @@
 pub mod atomic;
 pub mod chime;
 pub mod claude_env;
+pub mod command_icons;
 pub mod commit_messages;
 pub mod config;
 pub mod files;

@@ -1558,3 +1558,21 @@ The owner asked for the plan's usage in the session, as Claude chat shows it, wi
 - [ ] Edit a file in another editor and come back to the app: the count is updated.
 - [ ] A merge conflict: the count turns red and the tooltip names the conflicts.
 
+## Toolbar commands: built-in icons (owner's request, 2026-11-28)
+
+- Each toolbar command has an **Icon** row in the Toolbar Commands editor: a button showing the icon, which opens a picker with
+  - **Automatic** (the default): picked from the command's name, then its command line. Build → hammer, Test → flask, Debug → bug, Lint/Check → list with ticks, Format → paintbrush, Deploy/Release → rocket, Docker/Compose → container, Migrate/DB → database, Run/Start/Dev → play, and so on. Nothing telling: play, as before;
+  - **No icon**;
+  - 28 built-in icons, each with what it suggests in its tooltip: run, debug, build, test, check, format, clean, stop, restart, watch, deploy, publish, install, package, server, web, database, containers, shell, git, docs, generate, AI, benchmark, profile, security, tools, code.
+- Stored as `icon` on the command in `projects.json` (a key such as `"debug"`, `"none"`, or absent for Automatic). Older projects get Automatic, so existing buttons pick up fitting icons by themselves. An unknown key shows play.
+- The pictures are Lucide icons (ISC, already bundled by gpui-kit-assets); 18 more of them are now bundled with the app, a few hundred bytes each.
+- `anveg_core::command_icons`: the list, the guess and how a choice resolves.
+
+**Verified (sandbox):** dark and light themes. With commands Hello, Test, Debug, Ship (set to deploy) and Lint (set to No icon), the bar showed play, flask, bug, rocket and no icon. Choosing the bug for Hello in the picker changed the bar at once, closed the picker and saved `"icon": "debug"`. The grid's tooltips show ("Format"). Tests: `guesses_from_the_name_then_the_command`, `resolves_choices_none_and_unknown_keys` (core), `every_command_icon_has_its_own_bundled_picture` (app: each key has its own picture and its SVG loads), and the projects round trip covers the new field.
+
+**Manual checks (Mac)**
+- [ ] Existing commands named Build, Test or Run show a hammer, a flask and a play icon without any change.
+- [ ] Choose an icon for a command: the top bar shows it at once, and it is still there after quitting and reopening.
+- [ ] "No icon" leaves only the name on the button; "Automatic" goes back to the guess.
+- [ ] Both themes: the icons are crisp at the toolbar's size, and the picker's selected choice is clear.
+

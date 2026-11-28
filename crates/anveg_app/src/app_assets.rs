@@ -35,6 +35,25 @@ gpui_kit::assets::icon_assets!(
         // The session bar's plan usage meter, and a reached limit.
         Gauge,
         Hourglass,
+        // Toolbar command icons (`command_icons`), beyond the default set.
+        Bug,
+        Hammer,
+        FlaskConical,
+        ListChecks,
+        Paintbrush,
+        Rocket,
+        Upload,
+        Download,
+        Package,
+        Server,
+        Database,
+        Container,
+        GitBranch,
+        Zap,
+        Sparkles,
+        ShieldCheck,
+        Wrench,
+        Code,
     ]
 );
 

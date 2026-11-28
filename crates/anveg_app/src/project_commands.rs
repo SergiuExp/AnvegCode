@@ -8,10 +8,51 @@
 
 use std::collections::BTreeSet;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::{App, Global, KeyBinding, Keystroke, OperatingSystem};
 
 use crate::actions::RunProjectCommand;
 use crate::model::model;
+
+/// The picture for a built-in command icon (`command_icons::ICONS`).
+pub fn icon_image(key: &str) -> IconName {
+    match key {
+        "debug" => IconName::Bug,
+        "build" => IconName::Hammer,
+        "test" => IconName::FlaskConical,
+        "check" => IconName::ListChecks,
+        "format" => IconName::Paintbrush,
+        "clean" => IconName::Eraser,
+        "stop" => IconName::CircleStop,
+        "restart" => IconName::RefreshCw,
+        "watch" => IconName::Eye,
+        "deploy" => IconName::Rocket,
+        "publish" => IconName::Upload,
+        "install" => IconName::Download,
+        "package" => IconName::Package,
+        "server" => IconName::Server,
+        "web" => IconName::Globe,
+        "database" => IconName::Database,
+        "container" => IconName::Container,
+        "terminal" => IconName::SquareTerminal,
+        "git" => IconName::GitBranch,
+        "docs" => IconName::BookOpen,
+        "generate" => IconName::Zap,
+        "ai" => IconName::Sparkles,
+        "bench" => IconName::Gauge,
+        "profile" => IconName::Cpu,
+        "security" => IconName::ShieldCheck,
+        "tools" => IconName::Wrench,
+        "code" => IconName::Code,
+        _ => IconName::Play,
+    }
+}
+
+/// The icon a command's button shows (its choice, or picked from its
+/// name), or none.
+pub fn command_icon(c: &anveg_core::config::ProjectCommand) -> Option<IconName> {
+    anveg_core::command_icons::resolve(c.icon.as_deref(), &c.name, &c.command).map(icon_image)
+}
 
 /// Shortcuts the app (or the terminal and editor) already use.
 const RESERVED: &[&str] = &[
@@ -141,6 +182,22 @@ pub fn display(shortcut: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_command_icon_has_its_own_bundled_picture() {
+        use gpui_kit::AssetSource as _;
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, _) in anveg_core::command_icons::ICONS {
+            let icon = icon_image(key);
+            assert!(*key == "run" || icon != IconName::Play, "{key} has no picture");
+            assert!(seen.insert(icon.path()), "{key} shares its picture");
+            let path = icon.path();
+            assert!(
+                matches!(crate::app_assets::AppAssets.load(&path), Ok(Some(_))),
+                "{path} is not bundled"
+            );
+        }
+    }
 
     #[test]
     fn shortcuts() {

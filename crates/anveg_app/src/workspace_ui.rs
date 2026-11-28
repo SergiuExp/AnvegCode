@@ -574,17 +574,18 @@ impl ProjectWindow {
                     crate::project_commands::display(&command.shortcut)
                 )
             };
-            row = row.child(
-                Button::new(SharedString::from(format!("tb-cmd-{id}")))
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .icon(Icon::from(gpui_kit::assets::IconName::Play))
-                    .label(name)
-                    .tooltip(tip)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_project_command(&id, window, cx)
-                    })),
-            );
+            let mut button = Button::new(SharedString::from(format!("tb-cmd-{id}")))
+                .ghost()
+                .size(ButtonSize::Sm)
+                .label(name)
+                .tooltip(tip)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_project_command(&id, window, cx)
+                }));
+            if let Some(icon) = crate::project_commands::command_icon(&command) {
+                button = button.icon(Icon::from(icon));
+            }
+            row = row.child(button);
         }
         row.child(
             Button::new("tb-cmd-edit")

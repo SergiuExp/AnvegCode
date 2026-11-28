@@ -292,6 +292,10 @@ pub struct ProjectCommand {
     /// (stopping a run that is still going). On: a new tab every time.
     #[serde(default)]
     pub new_terminal: bool,
+    /// The button's icon: a key from `command_icons::ICONS`, `"none"`, or
+    /// `None` to pick one from the name (Automatic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 fn yes() -> bool {
@@ -307,6 +311,7 @@ impl ProjectCommand {
             shortcut: String::new(),
             show_in_toolbar: true,
             new_terminal: false,
+            icon: None,
         }
     }
 }
@@ -806,6 +811,7 @@ mod tests {
         assert!(c.show_in_toolbar);
         assert!(!c.new_terminal);
         assert!(c.shortcut.is_empty());
+        assert_eq!(c.icon, None);
         Ok(())
     }
 
