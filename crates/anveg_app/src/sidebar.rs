@@ -278,6 +278,11 @@ impl ProjectWindow {
                             format!("Session: {}", s.id),
                             format!("Status: {}", status_label(status)),
                         ];
+                        let limit = self.limit_label(&s.id, cx);
+                        if let Some(label) = &limit {
+                            tip.push(label.clone());
+                            tip.push("Claude Code carries on by itself when the limit resets.".into());
+                        }
                         if let Some(created) = s.created {
                             tip.push(format!("Created: {}", format_utc(created)));
                         }
@@ -355,12 +360,21 @@ impl ProjectWindow {
                                     .child({
                                         // Its status in words while it runs, and a
                                         // warning before Claude Code deletes it.
-                                        let state = running.then_some(match status {
-                                            Some(anveg_core::status::SessionStatus::Working) => "Working",
-                                            Some(anveg_core::status::SessionStatus::NeedsInput) => "Needs input",
-                                            _ => "Running",
+                                        // A usage limit outranks the rest: nothing
+                                        // happens until it resets.
+                                        let state = running.then(|| match (&limit, status) {
+                                            (Some(label), _) => label.clone(),
+                                            (None, Some(anveg_core::status::SessionStatus::Working)) => "Working".to_owned(),
+                                            (None, Some(anveg_core::status::SessionStatus::NeedsInput)) => {
+                                                "Needs input".to_owned()
+                                            }
+                                            _ => "Running".to_owned(),
                                         });
-                                        let state_color = c.status(status).unwrap_or(c.muted_foreground);
+                                        let state_color = if limit.is_some() {
+                                            warn
+                                        } else {
+                                            c.status(status).unwrap_or(c.muted_foreground)
+                                        };
                                         let expiry = (!running)
                                             .then(|| self.days_left(s.last_activity, now))
                                             .flatten();

@@ -32,6 +32,9 @@ gpui_kit::assets::icon_assets!(
         // The Git tab's List / Tree switch.
         List,
         FolderTree,
+        // The session bar's plan usage meter, and a reached limit.
+        Gauge,
+        Hourglass,
     ]
 );
 

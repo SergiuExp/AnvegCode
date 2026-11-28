@@ -85,6 +85,46 @@ pub fn relative(then_millis: i64, now: i64) -> String {
     }
 }
 
+/// When a usage limit starts over, worded as Claude Code does: `3:45pm`
+/// later today, `Mon 9:00am` within the week, `Dec 3` further out.
+/// `resets_at` and `now` are Unix seconds.
+pub fn reset_label(resets_at: i64, now: i64, tz: &jiff::tz::TimeZone) -> String {
+    let (Ok(at), Ok(today)) = (jiff::Timestamp::from_second(resets_at), jiff::Timestamp::from_second(now)) else {
+        return String::new();
+    };
+    let at = at.to_zoned_datetime(tz.clone());
+    let today = today.to_zoned_datetime(tz.clone());
+    let time = at.strftime("%-I:%M%P").to_string();
+    if at.date() == today.date() {
+        time
+    } else if resets_at - now < 6 * 86_400 {
+        format!("{} {time}", at.strftime("%a"))
+    } else {
+        at.strftime("%b %-d").to_string()
+    }
+}
+
+/// [`reset_label`] in the Mac's time zone.
+pub fn local_reset_label(resets_at: i64, now: i64) -> String {
+    reset_label(resets_at, now, &jiff::tz::TimeZone::system())
+}
+
+/// How long until `at` (Unix seconds): "in 2 h 14 min", "in 3 d 4 h",
+/// "in under a minute".
+pub fn until_label(at: i64, now: i64) -> String {
+    let secs = (at - now).max(0);
+    let (days, hours, minutes) = (secs / 86_400, (secs % 86_400) / 3600, (secs % 3600) / 60);
+    if days > 0 {
+        if hours > 0 { format!("in {days} d {hours} h") } else { format!("in {days} d") }
+    } else if hours > 0 {
+        if minutes > 0 { format!("in {hours} h {minutes} min") } else { format!("in {hours} h") }
+    } else if minutes > 0 {
+        format!("in {minutes} min")
+    } else {
+        "in under a minute".to_owned()
+    }
+}
+
 /// `2026-11-23 18:54` in UTC, for tooltips.
 /// The local time of day, `HH:MM:SS` (UTC when the time zone is unknown).
 pub fn local_hms() -> String {
@@ -119,6 +159,23 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_and_until_labels() {
+        let utc = jiff::tz::TimeZone::UTC;
+        // Thu 2026-11-26 10:00 UTC.
+        let now = 1_795_687_200;
+        assert_eq!(reset_label(now + 5 * 3600 + 45 * 60, now, &utc), "3:45pm");
+        assert_eq!(reset_label(now - 10 * 3600, now, &utc), "12:00am");
+        // Mon 2026-11-30 09:00.
+        assert_eq!(reset_label(now + 4 * 86_400 - 3600, now, &utc), "Mon 9:00am");
+        assert_eq!(reset_label(now + 7 * 86_400, now, &utc), "Dec 3");
+        assert_eq!(until_label(now + 2 * 3600 + 14 * 60 + 5, now), "in 2 h 14 min");
+        assert_eq!(until_label(now + 3 * 86_400 + 4 * 3600, now), "in 3 d 4 h");
+        assert_eq!(until_label(now + 3600, now), "in 1 h");
+        assert_eq!(until_label(now + 59, now), "in under a minute");
+        assert_eq!(until_label(now - 5, now), "in under a minute");
+    }
 
     #[test]
     fn parses_claude_timestamps() {

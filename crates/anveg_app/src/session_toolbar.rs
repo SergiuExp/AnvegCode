@@ -1,6 +1,7 @@
 //! The bar above a Claude session: model, effort, how full the context is
-//! next to Compact, Stop, Rewind, Clear, a menu of less used commands, and
-//! the user's own buttons. Every button types a slash command (or the
+//! next to Compact, Stop, Rewind, Clear, a menu of less used commands, the
+//! user's own buttons, and at the end the plan's usage (5-hour and weekly
+//! limits, from Claude Code's status line), which opens a panel with both. Every button types a slash command (or the
 //! button's text) into the session and presses Enter, as if typed.
 //!
 //! What is usable follows the session's status: everything while Claude
@@ -11,7 +12,8 @@
 use std::time::Duration;
 
 use anveg_core::config::{DocKey, SessionButton};
-use anveg_core::status::{self, ContextUse, SessionStatus};
+use anveg_core::status::{self, ContextUse, LimitWindow, SessionStatus};
+use anveg_core::time::{local_reset_label, now_millis, relative, until_label};
 use gpui_cn::prelude::*;
 use gpui_cn::{DropdownMenu, MenuEntry, MenuItem as CnMenuItem};
 use gpui_kit::assets::IconName;
@@ -54,6 +56,39 @@ const MORE: &[(&str, &str)] = &[
 /// The context meter turns amber, then red.
 const CONTEXT_WARN: u8 = 70;
 const CONTEXT_HIGH: u8 = 85;
+
+/// The plan usage meter turns amber, then red.
+const PLAN_WARN: u8 = 80;
+const PLAN_HIGH: u8 = 95;
+
+/// What the plan usage panel shows, read when the bar is drawn.
+#[derive(Clone)]
+struct PlanView {
+    five_hour: Option<LimitWindow>,
+    seven_day: Option<LimitWindow>,
+    /// Some limit was ever reported (a Pro, Max or Ultra plan).
+    known: bool,
+    updated_ms: i64,
+    /// This session's estimated cost, in cents.
+    cost_cents: Option<u64>,
+    /// "Limit reached · resets 3:45pm" while this session is held up.
+    limit: Option<String>,
+    status_line_on: bool,
+    idle: bool,
+    now: i64,
+}
+
+impl PlanView {
+    /// The fuller of the two limits: what the bar shows.
+    fn peak(&self) -> Option<(&'static str, u8)> {
+        let five = self.five_hour.map(|w| ("5h", w.used_percentage));
+        let week = self.seven_day.map(|w| ("Week", w.used_percentage));
+        match (five, week) {
+            (Some(f), Some(w)) => Some(if w.1 > f.1 { w } else { f }),
+            (f, w) => f.or(w),
+        }
+    }
+}
 
 impl ProjectWindow {
     fn ready(&self, id: &str) -> Ready {
@@ -348,6 +383,7 @@ impl ProjectWindow {
         }
 
         row.child(div().flex_1())
+            .child(self.plan_meter(id, pane, ready, cx))
             .child(
                 small("edit")
                     .icon(Icon::from(IconName::Settings2))
@@ -356,6 +392,80 @@ impl ProjectWindow {
                         this.open_doc(DocKey::SessionButtons, window, cx)
                     })),
             )
+            .into_any_element()
+    }
+
+    fn plan_view(&self, id: &str, ready: Ready, cx: &App) -> PlanView {
+        let m = model(cx).read(cx);
+        let now = now_millis() / 1000;
+        let (five_hour, seven_day) = m.plan_usage.current(now);
+        PlanView {
+            five_hour,
+            seven_day,
+            known: m.plan_usage.is_known(),
+            updated_ms: m.plan_usage.updated_ms,
+            cost_cents: self.running.get(id).and_then(|r| r.line.as_ref()).and_then(|l| l.cost_cents),
+            limit: self.limit_label(id, cx),
+            status_line_on: m.settings.session_status_line,
+            idle: ready == Ready::Idle,
+            now,
+        }
+    }
+
+    /// “⏲ 5h ▮▮▯ 42%”: the fuller of the plan's limits; a press opens the
+    /// panel with both, when they reset, and this session's cost.
+    fn plan_meter(&self, id: &str, pane: &'static str, ready: Ready, cx: &mut Context<Self>) -> AnyElement {
+        let c = Colors::of(cx);
+        let view = self.plan_view(id, ready, cx);
+        let peak = view.peak();
+        let hold = self.limit_hold(id, cx);
+        let percent = peak.map_or(0, |p| p.1);
+        let fill = plan_color(percent, &c);
+        let width = 36.;
+        let mut trigger = Button::new(SharedString::from(format!("st-{pane}-plan")))
+            .ghost()
+            .size(ButtonSize::Sm)
+            .tooltip("Plan usage: 5-hour and weekly limits");
+        trigger = if let Some(reset) = hold {
+            let amber = plan_color(PLAN_WARN, &c);
+            let text = match reset {
+                Some(at) => format!("Limit until {}", local_reset_label(at, view.now)),
+                None => "Limit reached".to_owned(),
+            };
+            trigger
+                .icon(Icon::from(IconName::Hourglass).text_color(amber))
+                .child(div().text_xs().text_color(amber).child(text))
+        } else {
+            trigger
+                .icon(Icon::from(IconName::Gauge))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(peak.map_or("Usage", |p| p.0)),
+                )
+                .children(peak.map(|_| bar(width, percent, fill, c.border)))
+                .child(
+                    div()
+                        .text_xs()
+                        .min_w(px(26.))
+                        .child(peak.map_or_else(|| "–".to_owned(), |p| format!("{}%", p.1))),
+                )
+        };
+        let weak = cx.entity().downgrade();
+        let weak_content = weak.clone();
+        let id = id.to_owned();
+        Popover::new(SharedString::from(format!("st-{pane}-plan-panel")))
+            .align(gpui_kit::base::Align::End)
+            .open(self.usage_panel == Some(pane))
+            .on_open_change(move |open, _, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.usage_panel = open.then_some(pane);
+                    cx.notify();
+                });
+            })
+            .trigger(trigger)
+            .content(move |_, cx| plan_panel(&view, &id, weak_content, cx))
             .into_any_element()
     }
 
@@ -451,6 +561,182 @@ fn context_tooltip(usage: Option<&ContextUse>, cx: &App) -> Vec<String> {
     lines
 }
 
+fn plan_color(percent: u8, c: &Colors) -> Hsla {
+    if percent >= PLAN_HIGH {
+        c.destructive
+    } else if percent >= PLAN_WARN {
+        hsla(38. / 360., 0.92, 0.50, 1.0)
+    } else {
+        c.primary
+    }
+}
+
+/// A rounded bar `width` wide, filled to `percent`.
+fn bar(width: f32, percent: u8, fill: Hsla, track: Hsla) -> gpui_kit::Div {
+    div()
+        .w(px(width))
+        .h(px(6.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(track)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(px(width * f32::from(percent.min(100)) / 100.))
+                .rounded_full()
+                .bg(fill),
+        )
+}
+
+/// "$1.23", or "$0.004" → "<$0.01".
+fn dollars(cents: u64) -> String {
+    if cents == 0 {
+        "<$0.01".to_owned()
+    } else {
+        format!("${}.{:02}", cents / 100, cents % 100)
+    }
+}
+
+/// The plan usage panel: both limits with when they reset, a reached
+/// limit, this session's cost, and Claude Code's own /usage.
+fn plan_panel(
+    view: &PlanView,
+    id: &str,
+    window_view: gpui_kit::WeakEntity<ProjectWindow>,
+    cx: &App,
+) -> AnyElement {
+    let c = Colors::of(cx);
+    let width = 280.;
+    let mut panel = div().w(px(width)).p_1().flex().flex_col().gap_3();
+    panel = panel.child(
+        div()
+            .flex()
+            .items_baseline()
+            .justify_between()
+            .child(div().text_sm().font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Plan usage"))
+            .children((view.updated_ms > 0).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(format!("Updated {}", relative(view.updated_ms, view.now * 1000)))
+            })),
+    );
+    if let Some(limit) = &view.limit {
+        let amber = plan_color(PLAN_WARN, &c);
+        panel = panel.child(
+            div()
+                .flex()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .bg(amber.opacity(0.12))
+                .border_1()
+                .border_color(amber.opacity(0.4))
+                .child(Icon::from(IconName::Hourglass).size_4().text_color(amber))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .text_xs()
+                        .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(limit.clone()))
+                        .child(
+                            div()
+                                .text_color(c.muted_foreground)
+                                .child("New prompts wait until then. Claude Code carries on by itself when the limit resets."),
+                        ),
+                ),
+        );
+    }
+    let limit_row = |title: &str, window: Option<LimitWindow>| {
+        let percent = window.map_or(0, |w| w.used_percentage);
+        let fill = plan_color(percent, &c);
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(title.to_owned()))
+                    .child(window.map_or_else(|| "–".to_owned(), |w| format!("{}% used", w.used_percentage))),
+            )
+            .child(bar(width - 8., percent, fill, c.border))
+            .child(div().text_xs().text_color(c.muted_foreground).child(match window {
+                Some(w) => format!(
+                    "Resets {} · {}",
+                    local_reset_label(w.resets_at, view.now),
+                    until_label(w.resets_at, view.now)
+                ),
+                None => "Not known yet".to_owned(),
+            }))
+    };
+    if view.known {
+        panel = panel
+            .child(limit_row("5-hour limit", view.five_hour))
+            .child(limit_row("Weekly limit (all models)", view.seven_day));
+        panel = panel.child(div().text_xs().text_color(c.muted_foreground).child(
+            "One plan for every session, Claude Code elsewhere and claude.ai. Updates after each reply.",
+        ));
+    } else {
+        let why = if view.status_line_on {
+            "Shows after Claude's first reply, on a Pro, Max or Ultra plan. With an API key there are no plan limits."
+        } else {
+            "Turn on “Context, plan usage, model and effort above sessions” in Settings to see the 5-hour and weekly limits here."
+        };
+        panel = panel.child(div().text_xs().text_color(c.muted_foreground).child(why));
+    }
+    if let Some(cents) = view.cost_cents {
+        panel = panel.child(div().h(px(1.)).bg(c.border)).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .text_xs()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child("This session"))
+                        .child(format!("≈ {}", dollars(cents))),
+                )
+                .child(div().text_color(c.muted_foreground).child(if view.known {
+                    "What it would cost at API prices; your plan covers it."
+                } else {
+                    "Estimated at API list prices; your bill may differ."
+                })),
+        );
+    }
+    let id = id.to_owned();
+    panel
+        .child(
+            div().flex().justify_end().child(
+                Button::new("plan-panel-usage")
+                    .outline()
+                    .size(ButtonSize::Sm)
+                    .label("Details in Claude Code (/usage)")
+                    .disabled(!view.idle)
+                    .tooltip(if view.idle {
+                        "Show Claude Code's own usage screen in this session"
+                    } else {
+                        "Works while Claude waits for a prompt"
+                    })
+                    .on_click(move |_, window, cx| {
+                        let _ = window_view.update(cx, |this, cx| {
+                            this.usage_panel = None;
+                            this.send_and_focus(&id, "/usage", window, cx);
+                        });
+                    }),
+            ),
+        )
+        .into_any_element()
+}
+
 fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -465,7 +751,14 @@ fn thousands(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::thousands;
+    use super::{dollars, thousands};
+
+    #[test]
+    fn dollars_from_cents() {
+        assert_eq!(dollars(0), "<$0.01");
+        assert_eq!(dollars(7), "$0.07");
+        assert_eq!(dollars(1234), "$12.34");
+    }
 
     #[test]
     fn thousands_groups_digits() {

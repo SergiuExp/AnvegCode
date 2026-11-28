@@ -6,11 +6,12 @@
 //! connect/write timeout).
 //!
 //! The line has the shape of `anveg_core::status::HookMessage`:
-//! `{event, session_id, notification_type, source, cwd, terminal_id, ts}`.
+//! `{event, session_id, notification_type, source, cwd, error, terminal_id, ts}`.
 //!
 //! `anveg-hook statusline` is Claude Code's status line command instead
-//! (when the app's session toolbar reads it): it sends the model, effort
-//! and context use as a `StatusLine` message, then runs the user's own
+//! (when the app's session toolbar reads it): it sends the model, effort,
+//! context use, the plan's usage limits and the session's estimated cost
+//! as a `StatusLine` message, then runs the user's own
 //! status line command (`$ANVEG_USER_STATUSLINE`) with the same input and
 //! passes its output through, so their status line still shows.
 
@@ -117,9 +118,36 @@ fn status_message(input: &[u8], terminal_id: Option<String>) -> Option<String> {
             "context_window_size": num_at(&["context_window", "context_window_size"])
                 .map(|n| n as u64),
             "context_tokens": num_at(&["context_window", "total_input_tokens"]).map(|n| n as u64),
+            // Pro, Max and Ultra only; each window may be missing.
+            "five_hour": limit_window(&v, "five_hour"),
+            "seven_day": limit_window(&v, "seven_day"),
+            "cost_cents": num_at(&["cost", "total_cost_usd"])
+                .filter(|c| c.is_finite() && *c >= 0.0)
+                .map(|c| (c * 100.0).round() as u64),
         },
     });
     serde_json::to_string(&out).ok()
+}
+
+/// `rate_limits.<name>` as `{used_percentage, resets_at}` (whole
+/// percent, Unix seconds), or null.
+fn limit_window(v: &serde_json::Value, name: &str) -> serde_json::Value {
+    let window = v.get("rate_limits").and_then(|r| r.get(name));
+    let used = window
+        .and_then(|w| w.get("used_percentage"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|p| p.is_finite());
+    let resets = window
+        .and_then(|w| w.get("resets_at"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|t| t.is_finite() && *t > 0.0);
+    match (used, resets) {
+        (Some(used), Some(resets)) => serde_json::json!({
+            "used_percentage": used.clamp(0.0, 100.0).round() as u8,
+            "resets_at": resets as i64,
+        }),
+        _ => serde_json::Value::Null,
+    }
 }
 
 /// The line to send for a hook's stdin JSON.
@@ -136,6 +164,8 @@ fn message(input: &[u8], terminal_id: Option<String>) -> Option<String> {
         "notification_type": field("notification_type"),
         "source": field("source"),
         "cwd": field("cwd"),
+        // `StopFailure` only: `rate_limit`, `server_error`, …
+        "error": field("error"),
         "terminal_id": terminal_id,
         "ts": ts,
     });
@@ -188,8 +218,36 @@ mod tests {
         assert_eq!(v["status_line"]["effort"], "high");
         assert_eq!(v["status_line"]["used_percentage"], 31);
         assert_eq!(v["status_line"]["context_window_size"], 200000);
+        assert!(v["status_line"]["five_hour"].is_null());
+        assert!(v["status_line"]["cost_cents"].is_null());
         // Older versions without these fields still give a message.
         assert!(status_message(br#"{"session_id":"s"}"#, None).is_some());
+    }
+
+    #[test]
+    fn status_line_plan_limits_and_cost() {
+        let input = br#"{"session_id":"s","cost":{"total_cost_usd":1.2345},
+            "rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},
+            "seven_day":{"used_percentage":41.2}}}"#;
+        let line = status_message(input, None).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        assert_eq!(v["status_line"]["five_hour"]["used_percentage"], 24);
+        assert_eq!(v["status_line"]["five_hour"]["resets_at"], 1738425600);
+        // No reset time: not usable.
+        assert!(v["status_line"]["seven_day"].is_null());
+        assert_eq!(v["status_line"]["cost_cents"], 123);
+    }
+
+    #[test]
+    fn stop_failure_carries_the_error() {
+        let input = br#"{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit",
+            "error_details":"429 Too Many Requests"}"#;
+        let line = message(input, None).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        assert_eq!(v["event"], "StopFailure");
+        assert_eq!(v["error"], "rate_limit");
+        // Details may hold request text: not sent.
+        assert!(v.get("error_details").is_none());
     }
 
     #[test]

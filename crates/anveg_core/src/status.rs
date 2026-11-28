@@ -41,7 +41,111 @@ pub struct StatusLineInfo {
     pub used_percentage: Option<u8>,
     pub context_window_size: Option<u64>,
     pub context_tokens: Option<u64>,
+    /// The plan's rolling 5-hour limit (Pro, Max; not Ultra or API keys).
+    pub five_hour: Option<LimitWindow>,
+    /// The plan's weekly limit, across all models.
+    pub seven_day: Option<LimitWindow>,
+    /// The session's estimated cost so far, at API list prices, in cents.
+    pub cost_cents: Option<u64>,
 }
+
+/// One of the plan's usage limits, as Claude Code's status line reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitWindow {
+    /// 0–100.
+    pub used_percentage: u8,
+    /// Unix seconds when the window starts over.
+    pub resets_at: i64,
+}
+
+/// At or above this, a limit counts as reached.
+pub const LIMIT_FULL: u8 = 100;
+
+/// A rate-limited turn blames the limits at least this full.
+const LIMIT_NEAR: u8 = 95;
+
+/// The plan's usage, for the whole account: every session reports the same
+/// limits, so the app keeps one copy, merged from all of them.
+///
+/// A session's status line can repeat numbers it got a while ago (it runs
+/// again on a mode change, say), so a report never lowers what is known:
+/// within one window (same reset time) use only grows, and a later reset
+/// time means a newer window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanUsage {
+    pub five_hour: Option<LimitWindow>,
+    pub seven_day: Option<LimitWindow>,
+    /// Unix ms of the latest report with numbers in it.
+    pub updated_ms: i64,
+}
+
+impl PlanUsage {
+    /// Take in a status line report sent at `ts_ms`. Returns whether
+    /// anything changed.
+    pub fn merge(&mut self, line: &StatusLineInfo, ts_ms: i64) -> bool {
+        if line.five_hour.is_none() && line.seven_day.is_none() {
+            return false;
+        }
+        let before = self.clone();
+        merge_window(&mut self.five_hour, line.five_hour);
+        merge_window(&mut self.seven_day, line.seven_day);
+        // Up to date only when it says what is now known (an old report
+        // with lower numbers is not news).
+        let agrees = |known: Option<LimitWindow>, new: Option<LimitWindow>| new.is_none() || new == known;
+        if agrees(self.five_hour, line.five_hour) && agrees(self.seven_day, line.seven_day) {
+            self.updated_ms = self.updated_ms.max(ts_ms);
+        }
+        *self != before
+    }
+
+    /// The windows that have not reset yet at `now` (Unix seconds): after
+    /// its reset time a window's numbers are old.
+    pub fn current(&self, now: i64) -> (Option<LimitWindow>, Option<LimitWindow>) {
+        let live = |w: Option<LimitWindow>| w.filter(|w| w.resets_at > now);
+        (live(self.five_hour), live(self.seven_day))
+    }
+
+    /// Whether any limit was ever reported (a Pro, Max or Ultra plan).
+    pub fn is_known(&self) -> bool {
+        self.five_hour.is_some() || self.seven_day.is_some()
+    }
+
+    /// When a reached limit lets Claude work again: the latest reset among
+    /// the full windows. None when no limit is reached.
+    pub fn blocked_until(&self, now: i64) -> Option<i64> {
+        self.reset_of_windows_at(LIMIT_FULL, now)
+    }
+
+    /// For a turn stopped by a rate limit: when the (nearly) full limit
+    /// resets, if one is.
+    pub fn reset_for_rate_limit(&self, now: i64) -> Option<i64> {
+        self.reset_of_windows_at(LIMIT_NEAR, now)
+    }
+
+    fn reset_of_windows_at(&self, at_least: u8, now: i64) -> Option<i64> {
+        let (five, week) = self.current(now);
+        [five, week]
+            .into_iter()
+            .flatten()
+            .filter(|w| w.used_percentage >= at_least)
+            .map(|w| w.resets_at)
+            .max()
+    }
+}
+
+fn merge_window(known: &mut Option<LimitWindow>, new: Option<LimitWindow>) {
+    let Some(new) = new else { return };
+    match known {
+        Some(k) if k.resets_at == new.resets_at => {
+            k.used_percentage = k.used_percentage.max(new.used_percentage);
+        }
+        Some(k) if k.resets_at > new.resets_at => {}
+        _ => *known = Some(new),
+    }
+}
+
+/// `StopFailure`'s error type for a rate or usage limit.
+pub const RATE_LIMIT_ERROR: &str = "rate_limit";
 
 /// How full a session's context window is, for the bar above sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +195,9 @@ pub const HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
     "Notification",
     "Stop",
+    // A turn that ended on an API error (a usage limit, say): `Stop` does
+    // not run then.
+    "StopFailure",
     "SessionEnd",
 ];
 
@@ -108,6 +215,8 @@ pub struct HookMessage {
     /// `SessionStart` only: `startup`, `resume`, `clear`, `compact`, `fork`.
     pub source: Option<String>,
     pub cwd: Option<String>,
+    /// `StopFailure` only: the error type, e.g. [`RATE_LIMIT_ERROR`].
+    pub error: Option<String>,
     /// The app's terminal id ([`TERMINAL_ID_ENV`]), when set.
     pub terminal_id: Option<String>,
     /// Unix ms when the hook ran.
@@ -130,6 +239,7 @@ impl HookMessage {
             notification_type: s("notification_type"),
             source: s("source"),
             cwd: s("cwd"),
+            error: s("error"),
             terminal_id,
             ts,
             status_line: None,
@@ -179,7 +289,7 @@ pub fn next_status(current: SessionStatus, event: &StatusEvent) -> SessionStatus
                 Some("idle_prompt") => SessionStatus::Idle,
                 _ => current,
             },
-            "Stop" => SessionStatus::Idle,
+            "Stop" | "StopFailure" => SessionStatus::Idle,
             "SessionEnd" => SessionStatus::Stopped,
             _ => current,
         },
@@ -342,6 +452,7 @@ mod tests {
         assert_eq!(next_status(Working, &note("idle_prompt")), Idle);
         assert_eq!(next_status(Working, &note("something_else")), Working);
         assert_eq!(next_status(Working, &hook("Stop")), Idle);
+        assert_eq!(next_status(Working, &hook("StopFailure")), Idle);
         assert_eq!(next_status(Idle, &hook("SessionEnd")), Stopped);
         assert_eq!(next_status(Working, &StatusEvent::ProcessExited), Stopped);
         assert_eq!(next_status(Working, &hook("UnknownEvent")), Working);
@@ -420,6 +531,62 @@ mod tests {
         drop(server);
         assert!(!path.exists());
         Ok(())
+    }
+
+    fn limits(five: Option<(u8, i64)>, week: Option<(u8, i64)>) -> StatusLineInfo {
+        let w = |(used_percentage, resets_at)| LimitWindow {
+            used_percentage,
+            resets_at,
+        };
+        StatusLineInfo {
+            five_hour: five.map(w),
+            seven_day: week.map(w),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plan_usage_never_goes_back() {
+        let mut u = PlanUsage::default();
+        assert!(!u.merge(&StatusLineInfo::default(), 1), "no limits: an API key");
+        assert!(!u.is_known());
+        assert!(u.merge(&limits(Some((20, 1000)), Some((40, 9000))), 10));
+        assert!(u.is_known());
+        // An older report from an idle session: same windows, less used.
+        assert!(!u.merge(&limits(Some((10, 1000)), Some((30, 9000))), 20));
+        assert_eq!(u.five_hour.map(|w| w.used_percentage), Some(20));
+        assert_eq!(u.updated_ms, 10);
+        // The same numbers again: still current.
+        assert!(u.merge(&limits(Some((20, 1000)), None), 25));
+        assert_eq!(u.updated_ms, 25);
+        // More use in the same window.
+        assert!(u.merge(&limits(Some((35, 1000)), None), 30));
+        assert_eq!(u.five_hour.map(|w| w.used_percentage), Some(35));
+        assert_eq!(u.seven_day.map(|w| w.used_percentage), Some(40));
+        // A new 5-hour window starts low; an older one cannot replace it.
+        assert!(u.merge(&limits(Some((2, 2000)), None), 40));
+        assert_eq!(u.five_hour, Some(LimitWindow { used_percentage: 2, resets_at: 2000 }));
+        assert!(!u.merge(&limits(Some((90, 1000)), None), 50));
+        // After its reset time a window is not current.
+        assert_eq!(u.current(1999).0.map(|w| w.used_percentage), Some(2));
+        assert_eq!(u.current(2000).0, None);
+        assert!(u.current(2000).1.is_some());
+    }
+
+    #[test]
+    fn when_a_reached_limit_resets() {
+        let mut u = PlanUsage::default();
+        u.merge(&limits(Some((100, 1000)), Some((60, 9000))), 1);
+        assert_eq!(u.blocked_until(500), Some(1000));
+        assert_eq!(u.blocked_until(1000), None, "the 5-hour window has reset");
+        // Both full: the weekly reset is the one that matters.
+        u.merge(&limits(None, Some((100, 9000))), 2);
+        assert_eq!(u.blocked_until(500), Some(9000));
+        let mut near = PlanUsage::default();
+        near.merge(&limits(Some((97, 1000)), Some((50, 9000))), 1);
+        assert_eq!(near.blocked_until(500), None);
+        assert_eq!(near.reset_for_rate_limit(500), Some(1000));
+        assert_eq!(PlanUsage::default().reset_for_rate_limit(0), None);
     }
 
     #[test]

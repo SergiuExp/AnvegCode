@@ -575,8 +575,8 @@ impl Render for SettingsWindow {
                         )
                     })
                     .child(self.row(
-                        "Context, model and effort above sessions",
-                        Some("Read from Claude Code's status line (your own status line still runs). For sessions started after the change; when off, context use is estimated (≈) from the transcript."),
+                        "Context, plan usage, model and effort above sessions",
+                        Some("Read from Claude Code's status line (your own status line still runs). For sessions started after the change; when off, context use is estimated (≈) from the transcript and plan usage isn't shown."),
                         self.switch(
                             "s-status-line",
                             s.session_status_line,

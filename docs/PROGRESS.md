@@ -1467,3 +1467,59 @@ The owner found the installed app running three windows, each in its own full-sc
 - [ ] Tree view in both themes: checkboxes, the dash box and the indent guides line up.
 - [ ] Uncheck a folder and commit: none of its files are in the commit.
 - [ ] Stage Folder (+) on a folder in Untracked stages only that folder's files.
+
+## Plan usage in the session bar, and "Limit reached" (owner's request, 2026-11-28)
+
+The owner asked for the plan's usage in the session, as Claude chat shows it, with a click to see both the 5-hour and the weekly limit, and for a session stopped by a limit to say so.
+
+**Where the numbers come from.** For Pro, Max and Ultra plans, Claude Code's status line input carries `rate_limits.five_hour` and `rate_limits.seven_day` (`used_percentage`, `resets_at`), and `cost.total_cost_usd`. Checked in the docs and in Claude Code 2.1.332 itself: those are the only plan windows it passes to a status line. The per-model weekly limits that `/usage` shows are not among them. `anveg-hook statusline` already runs as the status line of the app's sessions. It now forwards these too (whole percents, Unix seconds, cost in cents). There are no extra requests, nothing is read from Claude Code's credentials, and nothing in its configuration changes.
+
+- **One copy for the account** (`status::PlanUsage`, in the app model, memory only). Every session reports the same limits, so the app merges them. A report never lowers what is known: within a window (same reset time) use only grows, and a later reset time means a newer window. So an idle session repeating old numbers can't undo a busier session's newer ones. After its reset time a window isn't shown. The model wakes at the next reset to repaint.
+- **The meter** sits at the end of the session bar: a gauge, "5h" or "Week" (whichever is fuller), a bar and the percent. It turns amber from 80% and red from 95%. Before any numbers arrive it shows "Usage –".
+- **The panel** opens when you click the meter:
+  - the 5-hour limit and the weekly limit (all models), each with a bar, "% used" and "Resets 3:45pm · in 2 h 13 min";
+  - "Updated … ago";
+  - a note that the plan is shared by every session, Claude Code elsewhere and claude.ai;
+  - this session's estimated cost: "what it would cost at API prices; your plan covers it" on a plan, or "your bill may differ" with an API key;
+  - **Details in Claude Code (/usage)**, which types `/usage` into the session (while it waits for a prompt).
+
+  With an API key, or before the first reply, it explains why there are no limits. With the status line setting off, it says which setting to turn on.
+- **Limit reached.**
+  - The app now listens to Claude Code's `StopFailure` hook too. It runs instead of `Stop` when a turn ends on an API error. Before this, such a session stayed "Working" after the error.
+  - With the `rate_limit` error, the session is marked as held up until it works again (`UserPromptSubmit`, `PreToolUse`, `SessionStart`).
+  - Every running session also counts as held up while one of the plan's windows is at 100%, because each new prompt would wait.
+  - While held up:
+    - the session's row in the list says "Limit reached · resets 3:45pm" in amber;
+    - the session bar shows an hourglass with "Limit until 3:45pm";
+    - the panel shows the same in an amber box;
+    - the notification says "Limit reached · resets 3:45pm" instead of "Finished".
+  - The reset time is that of the full (≥95%) window. Without usage numbers it says "Limit reached" alone.
+  - It clears by itself at the reset time.
+- **Idle stop waits.** A held-up session is not stopped for being idle. By default Claude Code carries on by itself when the limit resets ("Continue automatically at usage limit"), and stopping it would lose that.
+- The setting is renamed "Context, plan usage, model and effort above sessions".
+- `scripts/fake-claude`:
+  - its status line now carries plan limits: each prompt adds 7% to the 5-hour window (from 30%), 2% to the weekly one (from 55%) and 42 cents to the cost;
+  - `/limit` fills the 5-hour window and ends the turn with `StopFailure`/`rate_limit`;
+  - `FAKE_CLAUDE_API_KEY=1` leaves the limits out.
+
+**Verified (sandbox):** dark and light themes, with fake-claude.
+- After two prompts the meter read "Week 59%" (the 5-hour window was at 44%). The panel showed both bars, reset times ("11:14am · in 2 h 13 min", "Wed 12:00pm · in 4 d 2 h") and "≈ $0.84".
+- `/limit`:
+  - the row said "Limit reached · resets 11:14am" in amber;
+  - the bar said "Limit until 11:14am";
+  - the panel showed the amber box and a red 100% bar.
+- With `FAKE_CLAUDE_API_KEY=1`: "Usage –", and the panel explained it and showed the cost.
+- Tests:
+  - core: `plan_usage_never_goes_back`, `when_a_reached_limit_resets` and `reset_and_until_labels`, plus `StopFailure` in the status rules;
+  - hook: `status_line_plan_limits_and_cost` and `stop_failure_carries_the_error` (which also checks that `error_details` is not forwarded);
+  - app: `dollars_from_cents`.
+
+**Not verified here:** whether a real usage limit reaches the hook as `StopFailure` with `rate_limit`. The docs list `rate_limit` as its error type but don't tie it to plan limits. The 100% rule covers the case where it doesn't.
+
+**Manual checks (Mac)**
+- [ ] On a Pro or Max plan, after one reply: the meter shows a percent, and the panel's numbers match Claude Code's `/usage` (the 5-hour and the all-models weekly bars).
+- [ ] Two sessions: a reply in one updates the meter in the other.
+- [ ] When the 5-hour limit is reached: the row and the bar say "Limit reached · resets …" with the same time Claude Code shows. After the reset, Claude Code carries on by itself and the label goes away.
+- [ ] With idle stop on (Settings), a session held up by a limit and hidden is not stopped.
+- [ ] Signed in with an API key: "Usage –", and the panel shows only the cost.
+- [ ] Both themes: the meter, the panel and the amber box are legible.

@@ -15,6 +15,10 @@
 # When that file also has a statusLine command, it runs it after each reply
 # with a status-line JSON: each prompt adds 30k tokens of context (of 200k),
 # `/compact` brings it back to 10k, `/effort X` sets the effort.
+# The status line also carries plan limits (unless $FAKE_CLAUDE_API_KEY is
+# set): each prompt adds 7% to the 5-hour window (from 30%) and 2% to the
+# weekly one (from 55%), and 42 cents to the cost. `/limit` uses the
+# 5-hour window up and ends the turn with a `StopFailure` (`rate_limit`).
 set -u
 
 CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -82,13 +86,25 @@ if [ -n "$name" ]; then
 fi
 context=0
 effort=high
+five=30
+week=55
+cents=0
+start=$(date +%s)
+five_reset=$((start + 2 * 3600 + 14 * 60))
+week_reset=$((start + 4 * 86400 + 3 * 3600))
+rate_limits() {
+  [ -n "${FAKE_CLAUDE_API_KEY:-}" ] && return 0
+  printf ',"rate_limits":{"five_hour":{"used_percentage":%d,"resets_at":%d},"seven_day":{"used_percentage":%d,"resets_at":%d}}' \
+    "$five" "$five_reset" "$week" "$week_reset"
+}
 status_line() {
   [ -n "$settings" ] && [ -f "$settings" ] || return 0
   command -v python3 >/dev/null || return 0
   local cmd
   cmd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["statusLine"]["command"])' "$settings" 2>/dev/null) || return 0
-  printf '{"session_id":"%s","model":{"id":"claude-fake-1","display_name":"Fake 1"},"effort":{"level":"%s"},"context_window":{"total_input_tokens":%d,"context_window_size":200000,"used_percentage":%d,"remaining_percentage":%d,"current_usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}' \
-    "$session_id" "$effort" "$context" $((context * 100 / 200000)) $((100 - context * 100 / 200000)) "$context" | sh -c "$cmd" >/dev/null 2>&1
+  printf '{"session_id":"%s","model":{"id":"claude-fake-1","display_name":"Fake 1"},"effort":{"level":"%s"},"context_window":{"total_input_tokens":%d,"context_window_size":200000,"used_percentage":%d,"remaining_percentage":%d,"current_usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"cost":{"total_cost_usd":%d.%02d}%s}' \
+    "$session_id" "$effort" "$context" $((context * 100 / 200000)) $((100 - context * 100 / 200000)) "$context" \
+    $((cents / 100)) $((cents % 100)) "$(rate_limits)" | sh -c "$cmd" >/dev/null 2>&1
 }
 
 hook SessionStart ',"source":"startup"'
@@ -108,12 +124,21 @@ handle() {
       context=10000; echo "Compacted."; status_line ;;
     /effort\ *)
       effort=${line#/effort }; echo "Effort set to $effort"; status_line ;;
+    /limit)
+      hook UserPromptSubmit
+      five=100
+      echo "You've hit your session limit"
+      hook StopFailure ',"error":"rate_limit","error_details":"429"'
+      status_line ;;
     *)
       hook UserPromptSubmit
       printf '{"type":"user","message":{"role":"user","content":"%s"},"timestamp":"%s","cwd":"%s","sessionId":"%s","entrypoint":"cli","isSidechain":false}\n' \
         "$(json_escape "$line")" "$(now)" "$(json_escape "$PWD")" "$session_id" >> "$file"
       echo "echo: $line"
       context=$((context + 30000)); [ "$context" -gt 200000 ] && context=200000
+      five=$((five + 7)); [ "$five" -gt 100 ] && five=100
+      week=$((week + 2)); [ "$week" -gt 100 ] && week=100
+      cents=$((cents + 42))
       hook Stop
       status_line ;;
   esac

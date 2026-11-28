@@ -14,7 +14,7 @@ use anveg_core::github_auth::{self, KeychainStore, Poll, TokenStore};
 use anveg_core::op_log::{OpLog, Level};
 use anveg_core::git::Git;
 use anveg_core::paths::AppPaths;
-use anveg_core::status::{HookMessage, HookServer, hooks_settings};
+use anveg_core::status::{HookMessage, HookServer, PlanUsage, hooks_settings};
 use anveg_term::TerminalSettings;
 use futures::StreamExt as _;
 use gpui_kit::{
@@ -55,6 +55,8 @@ pub enum ModelEvent {
     /// A project opened, closed or moved, or a window was renamed (for
     /// the project tabs).
     WindowsChanged,
+    /// The plan's usage changed, or one of its limits just reset.
+    PlanUsageChanged,
 }
 
 /// Signed in to GitHub or not.
@@ -181,6 +183,11 @@ pub struct AppModel {
     /// The Git tab's unfinished and recent commit messages.
     pub commit_messages: anveg_core::commit_messages::CommitMessages,
     commit_messages_task: Option<Task<()>>,
+    /// The plan's 5-hour and weekly use, from every session's status line
+    /// (the same account for all). Memory only.
+    pub plan_usage: PlanUsage,
+    /// Repaints when the next limit resets.
+    plan_reset_task: Option<Task<()>>,
     _hook_task: Option<Task<()>>,
 }
 
@@ -229,6 +236,8 @@ impl AppModel {
             save_task: None,
             commit_messages,
             commit_messages_task: None,
+            plan_usage: PlanUsage::default(),
+            plan_reset_task: None,
             _hook_task: None,
         };
         this.start_hooks(cx);
@@ -876,12 +885,48 @@ impl AppModel {
         self._hook_task = Some(cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
                 if this
-                    .update(cx, |_, cx| cx.emit(ModelEvent::Hook(Box::new(message))))
+                    .update(cx, |this, cx| {
+                        this.note_plan_usage(&message, cx);
+                        cx.emit(ModelEvent::Hook(Box::new(message)))
+                    })
                     .is_err()
                 {
                     break;
                 }
             }
+        }));
+    }
+
+    /// Keep the plan's usage from a status line report.
+    fn note_plan_usage(&mut self, message: &HookMessage, cx: &mut Context<Self>) {
+        if message.event != anveg_core::status::STATUS_LINE_EVENT {
+            return;
+        }
+        let Some(line) = &message.status_line else {
+            return;
+        };
+        if self.plan_usage.merge(line, message.ts) {
+            self.schedule_plan_reset(cx);
+            cx.emit(ModelEvent::PlanUsageChanged);
+        }
+    }
+
+    /// Wake when the soonest limit resets, so the meter stops showing old
+    /// numbers (and a "Limit reached" goes away) on time.
+    fn schedule_plan_reset(&mut self, cx: &mut Context<Self>) {
+        let now = anveg_core::time::now_millis() / 1000;
+        let (five, week) = self.plan_usage.current(now);
+        let Some(next) = [five, week].into_iter().flatten().map(|w| w.resets_at).min() else {
+            self.plan_reset_task = None;
+            return;
+        };
+        let wait = Duration::from_secs(u64::try_from(next - now).unwrap_or(0) + 1);
+        self.plan_reset_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.schedule_plan_reset(cx);
+                cx.emit(ModelEvent::PlanUsageChanged);
+            });
         }));
     }
 

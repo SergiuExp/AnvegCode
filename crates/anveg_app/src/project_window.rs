@@ -53,6 +53,13 @@ pub enum Ended {
 }
 
 /// A `claude` process the app started.
+/// A turn that ended on a rate or usage limit.
+#[derive(Clone, Copy, Debug)]
+pub struct LimitHit {
+    /// When the limit resets (Unix seconds), if the plan's usage said.
+    pub until: Option<i64>,
+}
+
 pub struct Running {
     pub view: Entity<TerminalView>,
     pub terminal_id: String,
@@ -68,6 +75,10 @@ pub struct Running {
     pub memory: Option<u64>,
     /// Model, effort and context from Claude Code's status line.
     pub line: Option<status::StatusLineInfo>,
+    /// Claude Code ended its last turn on a rate or usage limit; cleared
+    /// when it works again. Claude Code may carry on by itself once the
+    /// limit resets.
+    pub limited: Option<LimitHit>,
     idle_timer: Option<Task<()>>,
     _events: Subscription,
 }
@@ -259,6 +270,8 @@ pub struct ProjectWindow {
     pub context_menu: Entity<MenuState>,
     /// The “⋯” menus of the session bars: main pane, split pane.
     pub session_menus: [Entity<MenuState>; 2],
+    /// Which session bar's plan usage panel is open ("m" or "s").
+    pub usage_panel: Option<&'static str>,
     close_confirmed: bool,
     /// The user chose to close or quit without saving.
     pub unsaved_ok: bool,
@@ -483,6 +496,7 @@ impl ProjectWindow {
             toast_task: None,
             context_menu,
             session_menus,
+            usage_panel: None,
             cleanup_days: 30,
             new_menu: cx.new(MenuState::new),
             close_confirmed: false,
@@ -577,6 +591,14 @@ impl ProjectWindow {
             ModelEvent::ProjectsChanged => cx.notify(),
             ModelEvent::Hook(message) => self.on_hook(message, window, cx),
             ModelEvent::AttentionChanged | ModelEvent::WindowsChanged => {}
+            ModelEvent::PlanUsageChanged => {
+                // A limit was reached or reset: idle timers wait for it.
+                let ids: Vec<String> = self.running.keys().cloned().collect();
+                for id in ids {
+                    self.reschedule_idle(&id, cx);
+                }
+                cx.notify();
+            }
             ModelEvent::GitHubChanged => cx.notify(),
         }
     }
@@ -1208,6 +1230,7 @@ impl ProjectWindow {
                 worktree,
                 memory: None,
                 line: None,
+                limited: None,
                 idle_timer: None,
                 _events: events,
             },
@@ -1996,6 +2019,16 @@ impl ProjectWindow {
         if !running.is_live() {
             return;
         }
+        match message.event.as_str() {
+            "StopFailure" if message.error.as_deref() == Some(status::RATE_LIMIT_ERROR) => {
+                let now = anveg_core::time::now_millis() / 1000;
+                let until = self.model.read(cx).plan_usage.reset_for_rate_limit(now);
+                running.limited = Some(LimitHit { until });
+            }
+            "UserPromptSubmit" | "PreToolUse" | "SessionStart" | "SessionEnd" => running.limited = None,
+            _ => {}
+        }
+        let limited = running.limited.is_some();
         let before = running.status;
         let after = status::next_status(
             before,
@@ -2017,7 +2050,12 @@ impl ProjectWindow {
                     let looking = window.is_window_active() && self.is_session_visible(&key);
                     crate::sound::finished(looking, cx);
                 }
-                self.announce(&key, kind, window, cx);
+                if limited && message.event == "StopFailure" {
+                    let body = self.limit_label(&key, cx).unwrap_or_else(|| "Limit reached".into());
+                    self.notify_session(&key, &body, window, cx);
+                } else {
+                    self.announce(&key, kind, window, cx);
+                }
             }
             self.reschedule_idle(&key, cx);
             self.after_status_change(cx);
@@ -2083,12 +2121,53 @@ impl ProjectWindow {
         if window.is_window_active() && self.is_session_visible(id) {
             return;
         }
-        let title = format!("{} · {}", self.project_name(cx), self.session_name(id));
         let body = match kind {
             status::Announcement::NeedsInput => "Needs your input",
             status::Announcement::Finished => "Finished",
         };
+        self.notify_session(id, body, window, cx);
+    }
+
+    /// A system notification about session `id`, unless notifications are
+    /// off or the user is looking at it.
+    fn notify_session(&mut self, id: &str, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.read(cx).settings.notifications {
+            return;
+        }
+        if window.is_window_active() && self.is_session_visible(id) {
+            return;
+        }
+        let title = format!("{} · {}", self.project_name(cx), self.session_name(id));
         crate::platform::notify(&title, body, self.project_id, id);
+    }
+
+    /// While session `id` is held up by a usage limit (it ended a turn on
+    /// one, or the plan's limit is used up, so every new prompt waits):
+    /// when the limit resets (Unix seconds), if known. None otherwise.
+    pub fn limit_hold(&self, id: &str, cx: &App) -> Option<Option<i64>> {
+        let running = self.running.get(id).filter(|r| r.is_live())?;
+        let usage = &self.model.read(cx).plan_usage;
+        let now = anveg_core::time::now_millis() / 1000;
+        let reset = match running.limited {
+            // The status line may report the full limit only after the
+            // failed turn.
+            Some(hit) => hit.until.or_else(|| usage.reset_for_rate_limit(now)),
+            None => Some(usage.blocked_until(now)?),
+        };
+        match reset {
+            // Reset already: Claude Code carries on (or waits for a prompt).
+            Some(at) if at <= now => None,
+            reset => Some(reset),
+        }
+    }
+
+    /// "Limit reached · resets 3:45pm" (see [`Self::limit_hold`]).
+    pub fn limit_label(&self, id: &str, cx: &App) -> Option<String> {
+        let now = anveg_core::time::now_millis() / 1000;
+        Some(match self.limit_hold(id, cx)? {
+            Some(at) => format!("Limit reached · resets {}", anveg_core::time::local_reset_label(at, now)),
+            None => "Limit reached".to_owned(),
+        })
     }
 
     /// Idle shutdown (7.3): one timer per idle, hidden session, for its
@@ -2096,11 +2175,14 @@ impl ProjectWindow {
     fn reschedule_idle(&mut self, id: &str, cx: &mut Context<Self>) {
         let minutes = self.model.read(cx).settings.idle_stop_minutes;
         let visible = self.is_session_visible(id);
+        // Not while it waits out a usage limit: Claude Code carries on by
+        // itself when the limit resets, so stopping it would lose that.
+        let held = self.limit_hold(id, cx).is_some();
         let Some(running) = self.running.get_mut(id) else {
             return;
         };
         let wants_timer =
-            minutes > 0 && running.is_live() && running.status == SessionStatus::Idle && !visible;
+            minutes > 0 && running.is_live() && running.status == SessionStatus::Idle && !held && !visible;
         if !wants_timer {
             running.idle_timer = None;
             return;
