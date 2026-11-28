@@ -2,8 +2,10 @@
 //! remotes, history and stash, all through the `git` command-line tool.
 //!
 //! [`GitStore`] holds each repository's status for the window. It only
-//! watches files and runs `git` while a panel that needs it (Files, Git or
-//! GitHub) is visible; it never polls.
+//! watches files while a panel that needs it (Files, Git or GitHub) is
+//! visible, and never polls. Otherwise it runs `git status` now and then
+//! for the Git tab's count of uncommitted files: when the window gains
+//! focus, and while Claude works in one of its sessions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,10 +55,19 @@ pub struct RepoState {
     pub latest_run: Option<Run>,
 }
 
+/// What the Git tab's count says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Uncommitted {
+    pub files: usize,
+    pub staged: usize,
+    pub conflicts: usize,
+}
+
 pub struct GitStore {
     project: Uuid,
     pub repos: Vec<RepoState>,
     pub discovered: bool,
+    discovering: bool,
     active: bool,
     refreshing: bool,
     again: bool,
@@ -64,6 +75,8 @@ pub struct GitStore {
     pub last_refresh_ms: u128,
     watches: Vec<fswatch::Subscription>,
     debounce: Option<Task<()>>,
+    refresh_task: Option<Task<()>>,
+    discover_task: Option<Task<()>>,
     /// The Git activity log (pushes, pulls, fetches), oldest first.
     pub activity: Vec<Activity>,
     _tasks: Vec<Task<()>>,
@@ -87,12 +100,15 @@ impl GitStore {
             project,
             repos: Vec::new(),
             discovered: false,
+            discovering: false,
             active: false,
             refreshing: false,
             again: false,
             last_refresh_ms: 0,
             watches: Vec::new(),
             debounce: None,
+            refresh_task: None,
+            discover_task: None,
             activity: Vec::new(),
             _tasks: vec![loaded],
         }
@@ -155,13 +171,41 @@ impl GitStore {
         }
     }
 
-    pub fn refresh_if_active(&mut self, cx: &mut Context<Self>) {
-        if self.active {
-            self.refresh(cx);
+    /// Read the status again shortly, visible panel or not: for the Git
+    /// tab's count. Bursts (one per tool Claude runs) make one `git status`.
+    pub fn refresh_soon(&mut self, cx: &mut Context<Self>) {
+        if !self.discovered {
+            self.discover(cx);
+            return;
         }
+        self.debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| this.refresh(cx));
+        }));
+    }
+
+    /// Files with changes not committed, across the project's
+    /// repositories (a file both staged and changed counts once).
+    pub fn uncommitted(&self) -> Uncommitted {
+        let mut out = Uncommitted::default();
+        for status in self.repos.iter().filter_map(|r| r.status.as_ref()) {
+            let mut paths: Vec<&str> = status.entries.iter().map(|e| e.path.as_str()).collect();
+            paths.sort_unstable();
+            paths.dedup();
+            out.files += paths.len();
+            out.staged += status.section(Section::Staged).count();
+            out.conflicts += status.section(Section::Conflicts).count();
+        }
+        out
     }
 
     fn discover(&mut self, cx: &mut Context<Self>) {
+        if self.discovering {
+            return;
+        }
+        self.discovering = true;
         let roots = self.roots(cx);
         let git = model(cx).read(cx).git();
         let task = cx.background_spawn(async move {
@@ -173,9 +217,10 @@ impl GitStore {
                 })
                 .collect::<Vec<_>>()
         });
-        self._tasks.push(cx.spawn(async move |this, cx| {
+        self.discover_task = Some(cx.spawn(async move |this, cx| {
             let found = task.await;
             let _ = this.update(cx, |this, cx| {
+                this.discovering = false;
                 this.repos = found
                     .into_iter()
                     .map(|(root, git_dir)| RepoState {
@@ -189,8 +234,10 @@ impl GitStore {
                     .collect();
                 this.discovered = true;
                 // (refresh would look for repositories again when none.)
-                if this.active && !this.repos.is_empty() {
-                    this.watch(cx);
+                if !this.repos.is_empty() {
+                    if this.active {
+                        this.watch(cx);
+                    }
                     this.refresh(cx);
                 }
                 cx.notify();
@@ -276,7 +323,8 @@ impl GitStore {
                 .collect();
             (results, started.elapsed().as_millis())
         });
-        self._tasks.push(cx.spawn(async move |this, cx| {
+        // One refresh runs at a time, so this never drops a running one.
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let (results, ms) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.refreshing = false;

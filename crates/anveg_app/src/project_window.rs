@@ -2021,6 +2021,14 @@ impl ProjectWindow {
         if !running.is_live() {
             return;
         }
+        // Claude may have changed files: before its next tool and at the
+        // end of a turn, the Git tab's count is read again.
+        if matches!(message.event.as_str(), "PreToolUse" | "Stop" | "StopFailure") && self.shown {
+            self.git_store.update(cx, |s, cx| s.refresh_soon(cx));
+        }
+        let Some(running) = self.running.get_mut(&key) else {
+            return;
+        };
         match message.event.as_str() {
             "StopFailure" if message.error.as_deref() == Some(status::RATE_LIMIT_ERROR) => {
                 let now = anveg_core::time::now_millis() / 1000;

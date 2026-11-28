@@ -1537,3 +1537,24 @@ The owner asked for the plan's usage in the session, as Claude chat shows it, wi
 - [ ] Click the meter, choose 5-hour: the bar shows the 5-hour percent; Weekly: the weekly one; Fuller: the higher of the two.
 - [ ] The choice applies to the bar in another window too, and is kept after quitting and reopening.
 - [ ] Both themes: the selected option is clearly marked.
+
+## Git tab: count of uncommitted files (owner's request, 2026-11-28)
+
+- The Git tab in the sidebar shows a count of the files that are not committed: changed, staged, new (untracked) or in conflict, across the project's repositories. A file that is both staged and changed counts once. Red when any file has a conflict. Nothing when everything is committed.
+- Its tooltip: "12 files not committed (3 staged)", with "1 file with conflicts ·" in front when there are any.
+- **When it updates.** File watching still only runs while the Files, Git or GitHub tab is shown, as before. Otherwise the app runs `git status` (in the background, at most once per half second of activity):
+  - when the project is first shown;
+  - when the window gains focus (files may have changed in another app);
+  - while Claude works in one of the project's sessions: before each tool it runs (`PreToolUse`), so the previous tool's edits are counted, and when a turn ends (`Stop`, `StopFailure`).
+  So a change made in the app's own Terminal tab with the Sessions tab shown is counted at the next of those moments, or when the Git or Files tab is opened.
+- GitStore keeps one refresh task and one discovery task instead of a growing list of finished ones (more refreshes now happen with no git panel shown).
+
+**Verified (sandbox):** the test project with 4 uncommitted files showed "Git 4" at launch with the Sessions tab shown. A new file made outside the app turned it into "Git 5" when the fake Claude finished its turn. With one file staged the tooltip read "4 files not committed (1 staged)". Dark and light themes. Test: `changes_tooltip_text`.
+
+**Manual checks (Mac)**
+- [ ] A project with changes: the Git tab shows the count at launch, with the Sessions tab shown.
+- [ ] Ask Claude to edit or create a file: the count goes up while it works, without opening the Git tab.
+- [ ] Commit everything in the Git tab: the count disappears.
+- [ ] Edit a file in another editor and come back to the app: the count is updated.
+- [ ] A merge conflict: the count turns red and the tooltip names the conflicts.
+

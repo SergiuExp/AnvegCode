@@ -10,14 +10,14 @@ use gpui_cn::{InputEvent, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
     IntoElement, ParentElement as _,
-    SharedString, Styled as _, Window, div,
+    SharedString, Styled as _, Window, div, px,
 };
 
 use anveg_core::notes::SendKind;
 
 use crate::notes_panel::{NotesEvent, NotesPanel};
 use crate::files_panel::{FileIndex, FilesPanel, QuickOpen, QuickOpenEvent, build_index};
-use crate::git_panel::GitPanel;
+use crate::git_panel::{GitPanel, Uncommitted};
 use crate::github::GitHubPanel;
 use crate::project_window::{DialogKind, ProjectWindow, Tab, TermSlot};
 use crate::ui::Colors;
@@ -92,14 +92,21 @@ impl ProjectWindow {
         }
         self.git_store
             .update(cx, |s, cx| s.set_active(files || git || github, cx));
+        // The Git tab's count, with no git panel shown yet.
+        if self.shown && !self.git_store.read(cx).discovered {
+            self.git_store.update(cx, |s, cx| s.refresh_soon(cx));
+        }
         if let Some(p) = &self.github_panel {
             p.update(cx, |p, cx| p.set_visible(github, active, cx));
         }
     }
 
-    /// The window gained focus: refresh what is visible.
+    /// The window gained focus: refresh what is visible, and the Git tab's
+    /// count (files may have changed in another app).
     pub fn window_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.git_store.update(cx, |s, cx| s.refresh_if_active(cx));
+        if self.shown {
+            self.git_store.update(cx, |s, cx| s.refresh_soon(cx));
+        }
         self.update_panel_visibility(window, cx);
     }
 
@@ -122,18 +129,25 @@ impl ProjectWindow {
             (SidebarTab::Git, "Git"),
             (SidebarTab::GitHub, "GitHub"),
         ];
+        let c = Colors::of(cx);
+        let changes = self.git_store.read(cx).uncommitted();
         let mut row = div().flex().items_center().gap_0p5().px_1();
         for (tab, label) in tabs {
-            row = row.child(
-                Button::new(SharedString::from(format!("side-{label}")))
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .label(label)
-                    .toggled(current == tab).selected(current == tab)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.show_sidebar_tab(tab, window, cx)
-                    })),
-            );
+            let mut button = Button::new(SharedString::from(format!("side-{label}")))
+                .ghost()
+                .size(ButtonSize::Sm)
+                .label(label)
+                .toggled(current == tab)
+                .selected(current == tab)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.show_sidebar_tab(tab, window, cx)
+                }));
+            if tab == SidebarTab::Git && changes.files > 0 {
+                button = button
+                    .child(changes_badge(changes, &c))
+                    .tooltip(changes_tooltip(changes));
+            }
+            row = row.child(button);
         }
         row.into_any_element()
     }
@@ -673,5 +687,57 @@ impl ProjectWindow {
                     .map(|e| div().text_sm().text_color(c.destructive).child(e)),
             );
         Some(dialog.child(form).footer(footer).into_any_element())
+    }
+}
+
+/// The Git tab's count of uncommitted files: red with a conflict.
+fn changes_badge(changes: Uncommitted, c: &Colors) -> AnyElement {
+    let (bg, fg) = if changes.conflicts > 0 {
+        (c.destructive, gpui_kit::white())
+    } else {
+        (c.foreground.opacity(0.14), c.foreground)
+    };
+    div()
+        .min_w(px(18.))
+        .h(px(16.))
+        .px_1()
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(if changes.files > 999 { "999+".to_owned() } else { changes.files.to_string() })
+        .into_any_element()
+}
+
+/// "12 files not committed (3 staged)", and conflicts first.
+fn changes_tooltip(changes: Uncommitted) -> String {
+    let files = |n: usize| if n == 1 { "1 file".to_owned() } else { format!("{n} files") };
+    let mut text = format!("{} not committed", files(changes.files));
+    if changes.staged > 0 {
+        text.push_str(&format!(" ({} staged)", changes.staged));
+    }
+    if changes.conflicts > 0 {
+        text = format!("{} with conflicts · {text}", files(changes.conflicts));
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Uncommitted, changes_tooltip};
+
+    #[test]
+    fn changes_tooltip_text() {
+        let u = |files, staged, conflicts| Uncommitted { files, staged, conflicts };
+        assert_eq!(changes_tooltip(u(1, 0, 0)), "1 file not committed");
+        assert_eq!(changes_tooltip(u(12, 3, 0)), "12 files not committed (3 staged)");
+        assert_eq!(
+            changes_tooltip(u(4, 0, 1)),
+            "1 file with conflicts · 4 files not committed"
+        );
     }
 }
