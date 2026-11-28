@@ -1523,3 +1523,17 @@ The owner asked for the plan's usage in the session, as Claude chat shows it, wi
 - [ ] With idle stop on (Settings), a session held up by a limit and hidden is not stopped.
 - [ ] Signed in with an API key: "Usage –", and the panel shows only the cost.
 - [ ] Both themes: the meter, the panel and the amber box are legible.
+
+## Plan usage: choose which limit the meter shows (owner's request, 2026-11-28)
+
+- The plan usage panel has an "On the bar" switch under its title: **Fuller** (the default, as before), **5-hour** or **Weekly**.
+- The meter then always shows that limit ("5h 37%" or "Week 57%"). If the chosen limit isn't known (it just reset and no reply has come since), it shows "5h –" rather than switching to the other one.
+- The choice is a setting (`plan_meter` in settings.json), so it applies to every session and window and is kept across restarts. The panel stays open while you switch.
+- "Limit reached" still takes over the bar whichever limit is chosen.
+
+**Verified (sandbox):** dark and light themes, with fake-claude. Switching to 5-hour turned "Week 57%" into "5h 37%" at once with the panel still open; after a restart the choice was still 5-hour; Weekly brought back "Week 57%". Tests: `the_bar_shows_the_chosen_limit` (app), and the settings round trip covers the new field and its default.
+
+**Manual checks (Mac)**
+- [ ] Click the meter, choose 5-hour: the bar shows the 5-hour percent; Weekly: the weekly one; Fuller: the higher of the two.
+- [ ] The choice applies to the bar in another window too, and is kept after quitting and reopening.
+- [ ] Both themes: the selected option is clearly marked.

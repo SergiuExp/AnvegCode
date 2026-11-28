@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use anveg_core::config::{DocKey, SessionButton};
+use anveg_core::config::{DocKey, PlanMeter, SessionButton};
 use anveg_core::status::{self, ContextUse, LimitWindow, SessionStatus};
 use anveg_core::time::{local_reset_label, now_millis, relative, until_label};
 use gpui_cn::prelude::*;
@@ -76,17 +76,32 @@ struct PlanView {
     status_line_on: bool,
     idle: bool,
     now: i64,
+    /// Which limit the bar shows.
+    meter: PlanMeter,
 }
 
 impl PlanView {
-    /// The fuller of the two limits: what the bar shows.
-    fn peak(&self) -> Option<(&'static str, u8)> {
-        let five = self.five_hour.map(|w| ("5h", w.used_percentage));
-        let week = self.seven_day.map(|w| ("Week", w.used_percentage));
-        match (five, week) {
-            (Some(f), Some(w)) => Some(if w.1 > f.1 { w } else { f }),
-            (f, w) => f.or(w),
-        }
+    /// What the bar shows: its label and the percent used, if known.
+    fn shown(&self) -> (&'static str, Option<u8>) {
+        shown_limit(
+            self.meter,
+            self.five_hour.map(|w| w.used_percentage),
+            self.seven_day.map(|w| w.used_percentage),
+        )
+    }
+}
+
+/// The bar's label and percent: the chosen limit, or the fuller of the two.
+fn shown_limit(meter: PlanMeter, five: Option<u8>, week: Option<u8>) -> (&'static str, Option<u8>) {
+    match meter {
+        PlanMeter::FiveHour => ("5h", five),
+        PlanMeter::Weekly => ("Week", week),
+        PlanMeter::Fuller => match (five, week) {
+            (Some(f), Some(w)) if w > f => ("Week", Some(w)),
+            (Some(f), _) => ("5h", Some(f)),
+            (None, Some(w)) => ("Week", Some(w)),
+            (None, None) => ("Usage", None),
+        },
     }
 }
 
@@ -409,17 +424,19 @@ impl ProjectWindow {
             status_line_on: m.settings.session_status_line,
             idle: ready == Ready::Idle,
             now,
+            meter: m.settings.plan_meter,
         }
     }
 
-    /// “⏲ 5h ▮▮▯ 42%”: the fuller of the plan's limits; a press opens the
-    /// panel with both, when they reset, and this session's cost.
+    /// “⏲ 5h ▮▮▯ 42%”: the plan limit chosen in the panel (the fuller of
+    /// the two by default); a press opens the panel with both, when they
+    /// reset, and this session's cost.
     fn plan_meter(&self, id: &str, pane: &'static str, ready: Ready, cx: &mut Context<Self>) -> AnyElement {
         let c = Colors::of(cx);
         let view = self.plan_view(id, ready, cx);
-        let peak = view.peak();
+        let (label, shown) = view.shown();
         let hold = self.limit_hold(id, cx);
-        let percent = peak.map_or(0, |p| p.1);
+        let percent = shown.unwrap_or(0);
         let fill = plan_color(percent, &c);
         let width = 36.;
         let mut trigger = Button::new(SharedString::from(format!("st-{pane}-plan")))
@@ -442,14 +459,14 @@ impl ProjectWindow {
                     div()
                         .text_xs()
                         .text_color(c.muted_foreground)
-                        .child(peak.map_or("Usage", |p| p.0)),
+                        .child(label),
                 )
-                .children(peak.map(|_| bar(width, percent, fill, c.border)))
+                .children(shown.map(|_| bar(width, percent, fill, c.border)))
                 .child(
                     div()
                         .text_xs()
                         .min_w(px(26.))
-                        .child(peak.map_or_else(|| "–".to_owned(), |p| format!("{}%", p.1))),
+                        .child(shown.map_or_else(|| "–".to_owned(), |p| format!("{p}%"))),
                 )
         };
         let weak = cx.entity().downgrade();
@@ -678,6 +695,7 @@ fn plan_panel(
     };
     if view.known {
         panel = panel
+            .child(meter_choice(view.meter, &c))
             .child(limit_row("5-hour limit", view.five_hour))
             .child(limit_row("Weekly limit (all models)", view.seven_day));
         panel = panel.child(div().text_xs().text_color(c.muted_foreground).child(
@@ -737,6 +755,49 @@ fn plan_panel(
         .into_any_element()
 }
 
+/// "On the bar  [Fuller | 5-hour | Weekly]": which limit the meter shows,
+/// saved in the settings for every session.
+fn meter_choice(current: PlanMeter, c: &Colors) -> AnyElement {
+    let mut group = div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .p_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(c.border)
+        .bg(c.foreground.opacity(0.04));
+    for (meter, label, tip) in [
+        (PlanMeter::Fuller, "Fuller", "Show whichever limit is fuller"),
+        (PlanMeter::FiveHour, "5-hour", "Always show the 5-hour limit"),
+        (PlanMeter::Weekly, "Weekly", "Always show the weekly limit"),
+    ] {
+        let selected = current == meter;
+        group = group.child(
+            div().rounded(px(4.)).when(selected, |el| el.bg(c.selected_row)).child(
+                Button::new(SharedString::from(format!("plan-meter-{label}")))
+                    .ghost()
+                    .size(ButtonSize::Xs)
+                    .label(label)
+                    // The pressed state for assistive technology; the
+                    // look is the tinted cell around it.
+                    .toggled(selected)
+                    .tooltip(tip)
+                    .on_click(move |_, _, cx| {
+                        model(cx).update(cx, |m, cx| m.update_settings(cx, |s| s.plan_meter = meter));
+                    }),
+            ),
+        );
+    }
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().flex_1().text_xs().text_color(c.muted_foreground).child("On the bar"))
+        .child(group)
+        .into_any_element()
+}
+
 fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -751,7 +812,20 @@ fn thousands(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{dollars, thousands};
+    use super::{PlanMeter, dollars, shown_limit, thousands};
+
+    #[test]
+    fn the_bar_shows_the_chosen_limit() {
+        assert_eq!(shown_limit(PlanMeter::Fuller, Some(44), Some(59)), ("Week", Some(59)));
+        assert_eq!(shown_limit(PlanMeter::Fuller, Some(60), Some(59)), ("5h", Some(60)));
+        assert_eq!(shown_limit(PlanMeter::Fuller, Some(59), Some(59)), ("5h", Some(59)));
+        assert_eq!(shown_limit(PlanMeter::Fuller, None, Some(20)), ("Week", Some(20)));
+        assert_eq!(shown_limit(PlanMeter::Fuller, None, None), ("Usage", None));
+        assert_eq!(shown_limit(PlanMeter::FiveHour, Some(44), Some(59)), ("5h", Some(44)));
+        assert_eq!(shown_limit(PlanMeter::Weekly, Some(90), Some(59)), ("Week", Some(59)));
+        // The chosen limit is not known (it reset): no number, not the other.
+        assert_eq!(shown_limit(PlanMeter::FiveHour, None, Some(59)), ("5h", None));
+    }
 
     #[test]
     fn dollars_from_cents() {

@@ -587,6 +587,8 @@ impl ProjectWindow {
                 self.rebuild_from_index(cx);
                 self.restart_memory_sampling(cx);
                 self.reschedule_all_idle(cx);
+                // The session bar reads settings too (the plan meter).
+                cx.notify();
             }
             ModelEvent::ProjectsChanged => cx.notify(),
             ModelEvent::Hook(message) => self.on_hook(message, window, cx),

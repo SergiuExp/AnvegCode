@@ -83,6 +83,20 @@ pub struct Settings {
     /// The GitHub OAuth App's client ID, for "Sign in with GitHub" (the
     /// device flow). Not a secret. Without one, sign in with a token.
     pub github_client_id: Option<String>,
+    /// Which plan limit the session bar's usage meter shows (chosen in its
+    /// panel).
+    pub plan_meter: PlanMeter,
+}
+
+/// Which plan limit the usage meter on the session bar shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanMeter {
+    /// Whichever of the two is fuller.
+    #[default]
+    Fuller,
+    FiveHour,
+    Weekly,
 }
 
 /// When to play the chime as Claude finishes a turn.
@@ -180,6 +194,7 @@ impl Default for Settings {
             diff_split: true,
             changes_tree: true,
             github_client_id: None,
+            plan_meter: PlanMeter::default(),
         }
     }
 }
@@ -710,6 +725,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         let s = Settings {
             default_flags: "--permission-mode plan".into(),
+            plan_meter: PlanMeter::Weekly,
             ..Settings::default()
         };
         s.save(&path)?;
@@ -719,6 +735,7 @@ mod tests {
         let loaded = Settings::load(&path);
         assert!(!loaded.confirm_on_close);
         assert_eq!(loaded.terminal, TerminalPrefs::default());
+        assert_eq!(loaded.plan_meter, PlanMeter::Fuller);
         Ok(())
     }
 
